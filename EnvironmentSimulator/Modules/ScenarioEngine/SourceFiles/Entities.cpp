@@ -119,7 +119,7 @@ Position::ReturnCode Object::MoveAlongS(double ds, bool actualDistance)
     return pos_.MoveAlongS(ds, 0.0, GetJunctionSelectorAngle(), actualDistance, Position::MoveDirectionMode::HEADING_DIRECTION, true);
 }
 
-void Object::AssignController(Controller* controller)
+void Object::AssignController(scenarioengine::Controller* controller)
 {
     // if already assigned, first remove it from list of assigned controllers
     controllers_.erase(std::remove(controllers_.begin(), controllers_.end(), controller), controllers_.end());
@@ -128,7 +128,7 @@ void Object::AssignController(Controller* controller)
     controllers_.push_back(controller);
 }
 
-void Object::UnassignController(Controller* controller)
+void Object::UnassignController(scenarioengine::Controller* controller)
 {
     for (auto ctrl : controllers_)
     {
@@ -152,7 +152,7 @@ void Object::UnassignControllers()
     controllers_.clear();
 }
 
-bool Object::IsControllerActiveOnDomains(unsigned int domainMask, Controller::Type type)
+bool Object::IsControllerActiveOnDomains(unsigned int domainMask, scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
@@ -168,7 +168,7 @@ bool Object::IsControllerActiveOnDomains(unsigned int domainMask, Controller::Ty
     return false;
 }
 
-bool Object::IsControllerActiveOnAnyOfDomains(unsigned int domainMask, Controller::Type type)
+bool Object::IsControllerActiveOnAnyOfDomains(unsigned int domainMask, scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
@@ -184,13 +184,13 @@ bool Object::IsControllerActiveOnAnyOfDomains(unsigned int domainMask, Controlle
     return false;
 }
 
-bool Object::IsControllerModeOnDomains(ControlOperationMode mode, unsigned int domainMask, Controller::Type type)
+bool Object::IsControllerModeOnDomains(ControlOperationMode mode, unsigned int domainMask, scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
         if (ctrl->IsActiveOnDomains(domainMask))
         {
-            if (ctrl->GetMode() == mode && (type == Controller::Type::CONTROLLER_TYPE_UNDEFINED || ctrl->GetType() == ctrl->GetType()))
+            if (ctrl->GetMode() == mode && (type == scenarioengine::Controller::Type::CONTROLLER_TYPE_UNDEFINED || ctrl->GetType() == ctrl->GetType()))
             {
                 return true;
             }
@@ -204,13 +204,13 @@ bool Object::IsControllerModeOnDomains(ControlOperationMode mode, unsigned int d
     return false;
 }
 
-bool Object::IsControllerModeOnAnyOfDomains(ControlOperationMode mode, unsigned int domainMask, Controller::Type type)
+bool Object::IsControllerModeOnAnyOfDomains(ControlOperationMode mode, unsigned int domainMask, scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
         if (ctrl->IsActiveOnAnyOfDomains(domainMask))
         {
-            if (ctrl->GetMode() == mode && (type == Controller::Type::CONTROLLER_TYPE_UNDEFINED || ctrl->GetType() == ctrl->GetType()))
+            if (ctrl->GetMode() == mode && (type == scenarioengine::Controller::Type::CONTROLLER_TYPE_UNDEFINED || ctrl->GetType() == ctrl->GetType()))
             {
                 return true;
             }
@@ -224,7 +224,7 @@ bool Object::IsControllerModeOnAnyOfDomains(ControlOperationMode mode, unsigned 
     return false;
 }
 
-scenarioengine::Controller* scenarioengine::Object::GetAssignedControllerOftype(Controller::Type type)
+scenarioengine::Controller* scenarioengine::Object::GetAssignedControllerOftype(scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
@@ -237,7 +237,7 @@ scenarioengine::Controller* scenarioengine::Object::GetAssignedControllerOftype(
     return nullptr;
 }
 
-bool scenarioengine::Object::IsAnyAssignedControllerOfType(Controller::Type type)
+bool scenarioengine::Object::IsAnyAssignedControllerOfType(scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
@@ -250,7 +250,7 @@ bool scenarioengine::Object::IsAnyAssignedControllerOfType(Controller::Type type
     return false;
 }
 
-bool Object::IsAnyActiveControllerOfType(Controller::Type type)
+bool Object::IsAnyActiveControllerOfType(scenarioengine::Controller::Type type)
 {
     for (auto ctrl : controllers_)
     {
@@ -282,14 +282,14 @@ scenarioengine::Controller::Type Object::GetControllerTypeActiveOnDomain(Control
 
     if (ctrl != nullptr)
     {
-        return static_cast<Controller::Type>(ctrl->GetType());
+        return static_cast<scenarioengine::Controller::Type>(ctrl->GetType());
     }
     else if (IsGhost())
     {
-        return Controller::Type::GHOST_RESERVED_TYPE;
+        return scenarioengine::Controller::Type::GHOST_RESERVED_TYPE;
     }
 
-    return Controller::Type::CONTROLLER_TYPE_DEFAULT;
+    return scenarioengine::Controller::Type::CONTROLLER_TYPE_DEFAULT;
 }
 
 scenarioengine::Controller* Object::GetController(std::string name)
