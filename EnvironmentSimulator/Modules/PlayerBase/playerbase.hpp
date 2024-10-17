@@ -84,6 +84,7 @@ namespace scenarioengine
 
         ScenarioPlayer(int argc, char *argv[]);
         ~ScenarioPlayer();
+        void RegisterExternalViewer(viewer::Viewer *viewer);
         int  Init();
         void PrintUsage();
         bool IsQuitRequested()
@@ -216,6 +217,7 @@ namespace scenarioengine
 
 #ifdef _USE_OSG
         viewer::Viewer                          *viewer_;
+        bool                                     use_external_viewer;
         std::vector<viewer::SensorViewFrustum *> sensorFrustum;
 #ifdef _USE_OSI
         viewer::OSISensorDetection *OSISensorDetection;

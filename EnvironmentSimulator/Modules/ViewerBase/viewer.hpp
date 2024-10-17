@@ -208,7 +208,7 @@ namespace viewer
         osg::Vec3 pivot_pos;
         osg::Vec3 target_pos;
 
-        PointSensor() : ball_(0), line_(0), line_vertex_data_(0){};
+        PointSensor() : ball_(0), line_(0), line_vertex_data_(0) {};
         void Show()
         {
             group_->setNodeMask(NODE_MASK_ROAD_SENSORS);
@@ -408,7 +408,7 @@ namespace viewer
         {
             FetchImage(Viewer* viewer);
             using osg::Camera::DrawCallback::operator();
-            void                             operator()(osg::RenderInfo& renderInfo) const override;
+            void operator()(osg::RenderInfo& renderInfo) const override;
 
             mutable osg::ref_ptr<osg::Image> image_;
             viewer::Viewer*                  viewer_;
@@ -444,6 +444,8 @@ namespace viewer
         osg::ref_ptr<osg::MatrixTransform>          env_origin2odr_;   // transform the environment to the OpenDRIVE origin
         osg::ref_ptr<osg::MatrixTransform>          root_origin2odr_;  // transform objects to the OpenDRIVE origin
 
+        osgViewer::GraphicsWindow* gw_ = nullptr;
+
         std::string                   exe_path_;
         std::vector<KeyEventCallback> callback_;
         ImageCallback                 imgCallback_;
@@ -468,8 +470,11 @@ namespace viewer
                const char*             scenarioFilename,
                const char*             exe_path,
                osg::ArgumentParser     arguments,
-               SE_Options*             opt = 0);
+               SE_Options*             opt                         = 0,
+               bool                    register_event_handlers     = true,
+               bool                    register_camera_manipulator = true);
         ~Viewer();
+        void        Realize();
         static void PrintUsage();
         void        AddCustomCamera(double x, double y, double z, double h, double p, bool fixed_pos);
         void        AddCustomCamera(double x, double y, double z, bool fixed_pos);
