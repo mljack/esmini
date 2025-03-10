@@ -12,8 +12,8 @@ jobs:
   sanitize:
     strategy:
       matrix:
-        configuration: [Release]
-        os: [ubuntu-20.04]
+        configuration: [RelWithDebInfo]
+        os: [ubuntu-22.04]
 
     runs-on: ${{ matrix.os }}
 
