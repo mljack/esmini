@@ -1,7 +1,3 @@
-message(
-    STATUS "CMake version: "
-           ${CMAKE_VERSION})
-
 if(WIN32)
     cmake_minimum_required(
         VERSION 3.7.1 # for cmake generator VisualStudio 2017 support
@@ -12,6 +8,10 @@ else()
         VERSION 2.8.12...3.5
         FATAL_ERROR)
 endif()
+
+message(
+    STATUS "CMake version: "
+           ${CMAKE_VERSION})
 
 # ############################# Project generate options ###########################################################
 

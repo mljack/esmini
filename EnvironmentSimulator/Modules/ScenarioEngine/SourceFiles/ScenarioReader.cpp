@@ -61,6 +61,7 @@ ScenarioReader::ScenarioReader(Entities *entities, Catalogs *catalogs, bool disa
       story_board_(nullptr)
 {
     parameters.Clear();
+    variables.Clear();
 }
 
 ScenarioReader::~ScenarioReader()
@@ -177,7 +178,7 @@ int ScenarioReader::loadOSCFile(const char *path)
 
 int ScenarioReader::loadOSCMem(const pugi::xml_document &xml_doc)
 {
-    LOG("Loading XML document from memory");
+    // LOG("Loading XML document from memory");
 
     doc_.reset(xml_doc);
 
@@ -671,8 +672,8 @@ Vehicle *ScenarioReader::parseOSCVehicle(pugi::xml_node vehicleNode)
     else
     {
         // magic numbers: If first vehicle make it white, else red
-        vehicle->model_id_ = entities_->object_.size() == 0 ? 0 : 2;
-        vehicle->model3d_  = entities_->object_.size() == 0 ? "car_white.osgb" : "car_red.osgb";
+        vehicle->model_id_ = entities_->object_.size() + entities_->object_pool_.size() == 0 ? 0 : 2;
+        vehicle->model3d_  = entities_->object_.size() + entities_->object_pool_.size() == 0 ? "car_white.osgb" : "car_red.osgb";
     }
 
     // Overwrite default values if 3D model specified

@@ -17,6 +17,7 @@ add_subdirectory(Modules/ScenarioEngine)
 
 if(USE_OSG)
     add_subdirectory(Modules/ViewerBase)
+    add_subdirectory(Modules/StudioViewerBase)
 endif(USE_OSG)
 
 # ############################### Building Libraries ###################################################################
@@ -31,6 +32,7 @@ add_subdirectory(Applications/esmini-dyn)
 
 if(USE_OSG)
     add_subdirectory(Applications/odrviewer)
+    add_subdirectory(Applications/scenariostudio)
 endif(USE_OSG)
 
 add_subdirectory(Applications/odrplot)
@@ -94,6 +96,9 @@ set_folder(
     esmini-dyn
     ${ApplicationsFolder})
 set_folder(
+    scenariostudio
+    ${ApplicationsFolder})
+set_folder(
     dat2csv
     ${ApplicationsFolder})
 set_folder(
@@ -108,5 +113,8 @@ if(USE_OSG)
         ${ApplicationsFolder})
     set_folder(
         ViewerBase
+        ${ModulesFolder})
+    set_folder(
+        StudioViewerBase
         ${ModulesFolder})
 endif(USE_OSG)

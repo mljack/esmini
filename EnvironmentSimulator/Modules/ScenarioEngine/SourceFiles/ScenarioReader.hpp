@@ -137,6 +137,8 @@ namespace scenarioengine
         int  parseStoryBoard(StoryBoard& storyBoard);
         void parseOSCManeuver(Maneuver* maneuver, pugi::xml_node maneuverNode, ManeuverGroup* mGroup);
 
+        Object* ResolveObjectReference(std::string name);
+
         std::string getScenarioFilename()
         {
             return oscFilename_;
@@ -199,7 +201,6 @@ namespace scenarioengine
 
         int             ParseTransitionDynamics(pugi::xml_node node, OSCPrivateAction::TransitionDynamics& td);
         ConditionGroup* ParseConditionGroup(pugi::xml_node node);
-        Object*         ResolveObjectReference(std::string name);
     };
 
 }  // namespace scenarioengine

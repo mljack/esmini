@@ -1,0 +1,217 @@
+/*
+ * esmini - Environment Simulator Minimalistic
+ * https://github.com/esmini/esmini
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * Copyright (c) partners of Simulation Scenarios
+ * https://sites.google.com/view/simulationscenarios
+ */
+
+#pragma once
+
+#include <osgViewer/ViewerEventHandlers>
+#include "StudioViewer.hpp"
+#include "StudioDataModel.hpp"
+#include "XmlUtil.hpp"
+#include "RoadManager.hpp"
+#include "CommonMini.hpp"
+#include "OSCBoundingBox.hpp"  // For OSCBoundingBox structure
+#include "ScenarioReader.hpp"
+#include <deque>
+#include <string>
+#include <utility>
+#include <vector>
+#include <tuple>
+#include <functional>
+#include <unordered_set>
+#include <map>
+
+struct ImVec2;
+
+class StudioGui : public osgGA::GUIEventHandler
+{
+public:
+    StudioGui(viewer::StudioViewer* viewer);
+    ~StudioGui();
+
+    virtual bool     handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter& aa) override;
+    void             NewFrame(osg::RenderInfo& renderInfo);
+    void             Render(osg::RenderInfo& renderInfo);
+    StudioDataModel* GetModel()
+    {
+        return &data_model_;
+    }
+
+    void AddLogMessage(const char* message);
+
+    std::string GetEntryNameFromScenarioObject(const std::string& scenario_object_name) const;
+
+private:
+    void Exit();
+    void SetModified();
+
+    void QueueNodeExpansion(pugi::xml_node node);
+    void QueueSubtreeExpansion(pugi::xml_node node);
+
+    void ResetCameraPos();
+    void MoveMouse(double x, double y);
+
+    void SwitchToViewer();
+    void SwitchToComposer();
+    void HandleSpaceKey();  // Unified space key handler for mode switching
+
+    void UpdateMousePositionFromWorld();
+    void ExtractPositionsFromXml();
+    void DrawPositionMarkers();
+    void ClearPositionMarkers();
+
+    osg::ref_ptr<osg::Node> GetOSGBModelForScenarioObject(const std::string& scenario_object_name);
+    osg::ref_ptr<osg::Node> LoadOSGBModelWithScale(const std::string& file_path, EntityScaleMode scale_mode, const OSCBoundingBox& bounding_box);
+
+    struct OSGBModel;
+
+    // OSGB model management
+    void       PrepareReader();
+    void       UpdateScenarioObjectMapping();
+    OSGBModel* FindOSGBModelInCache(const std::string& model_name);
+    void       AddOSGBModelToCache(const std::string& model_name, const std::string& file_path, osg::ref_ptr<osg::Node> node);
+    int        GetModelIdFromCatalogEntry(const std::string& catalog_name, const std::string& entry_name);
+
+    // Vehicle/object picking and XML highlighting functions
+    PositionInfo* PickPosition();
+
+    void ClearXmlHighlights();
+    void HighlightXmlNodeForPosition(const PositionInfo& posInfo);
+
+    // Move context menu and operation support
+    void StartMoveOperation(PositionInfo* position_info);
+    void UpdateMoveOperation();
+    void EndMoveOperation();
+
+    // Locked target position update functions (for fixed target during move operations)
+    void UpdatePositionFromLockedTarget(PositionInfo* position_info);
+
+    void RenderRealTimeHUD();
+    void RenderLogWindow();
+    void RenderXmlTree();
+    void RenderXmlSubTree(pugi::xml_node node,
+                          int            level                 = 0,
+                          bool           force_expand          = false,
+                          bool           suppress_context_menu = false,
+                          int            level_to_expand       = 0,
+                          int            level_to_fold         = 0,
+                          bool           parent_matches_filter = false);
+    void HandleAttrDialog();
+    void HandleNodeDialog();
+    void HandleMovePositionMenu();
+    void HandleEsminiSettingsDialog();
+    void RenderMenuBar();
+    void RenderTimeline();
+    void HandleElementContextMenu();
+    void RenderValidationReport();
+
+    void Undo();
+    void Redo();
+
+    double time_;
+    bool   left_mouse_pressed_   = false;
+    bool   right_mouse_pressed_  = false;
+    bool   middle_mouse_pressed_ = false;
+    bool   shift_pressed_        = false;
+    bool   ctrl_pressed_         = false;
+    bool   alt_pressed_          = false;
+
+    // Move context menu support
+    bool          move_context_menu_to_open_  = false;
+    bool          move_operation_active_      = false;
+    PositionInfo* selected_position_for_move_ = nullptr;  // Position info for move operations
+
+    // Real-time HUD data
+    double hud_mouse_world_x_     = 0.0;
+    double hud_mouse_world_y_     = 0.0;
+    double hud_mouse_world_z_     = 0.0;
+    int    hud_mouse_road_id_     = -1;
+    int    hud_mouse_lane_id_     = -1;
+    double hud_mouse_s_           = 0.0;
+    double hud_mouse_t_           = 0.0;
+    double hud_mouse_lane_offset_ = 0.0;
+    double hud_mouse_lane_h_      = 0.0;
+    bool   hud_show_position_     = true;
+
+    std::vector<PositionInfo> extracted_positions_;
+
+    // Position marker tracking
+    bool   positions_extracted_ = false;  // Track if positions have been extracted
+    size_t last_scenario_hash_;           // Track scenario changes
+
+    // Click classification data for context menu distinction
+    int          pending_move_count_ = 0;
+    PositionInfo last_picked_position_info_;
+
+    float mouse_wheel_;
+    bool  initialized_;
+
+    int                   viewport_x_ = -1;
+    int                   viewport_y_ = -1;
+    viewer::StudioViewer* viewer_;
+    StudioDataModel       data_model_;
+
+    // Log window data
+    std::deque<std::string> log_messages_;
+    std::string             log_text_buffer_;  // Combined text buffer for selectable display
+    bool                    log_auto_scroll_  = true;
+    int                     max_log_messages_ = 1000;
+
+    // XML Tree highlighting support
+    std::vector<pugi::xml_node> highlighted_nodes_;
+
+    // XML Tree Search support
+    struct SearchResult
+    {
+        pugi::xml_node      node;
+        pugi::xml_attribute attr;
+        std::string         attribute_name;  // Empty if match is on node name
+    };
+
+    char                      search_text_[128] = "";
+    std::vector<SearchResult> search_results_;
+    int                       current_search_index_ = -1;
+    pugi::xml_node            search_highlight_node_;
+    pugi::xml_attribute       search_highlight_attr_;
+    pugi::xml_node            node_to_scroll_to_;
+    pugi::xml_attribute       attr_to_scroll_to_;
+    pugi::xml_node            node_and_attrs_to_scroll_to_;
+
+    // XML Tree Filter support
+    char filter_text_[128] = "";
+    bool filter_active_    = false;
+    bool filter_isolate_   = false;
+
+    bool to_reset_camera_pos_ = true;
+
+    std::vector<pugi::xml_node> nodes_to_expand_;
+    std::vector<pugi::xml_node> nodes_to_collapse_;
+
+    bool show_validation_window_ = false;
+
+    // OSGB model loading and caching system
+    struct OSGBModel
+    {
+        std::string             name;       // Model identifier (e.g., entryName)
+        std::string             file_path;  // Path to the OSGB file
+        osg::ref_ptr<osg::Node> node;       // Loaded model node
+        bool                    is_loaded;  // Whether the model is successfully loaded
+    };
+
+    std::map<std::string, std::string> scenario_object_name_to_entryname_;  // Cache for name mapping
+    std::vector<OSGBModel>             osgb_model_cache_;                   // Cache for loaded OSGB models
+    bool                               scenario_object_map_dirty_;          // Whether the mapping needs to be updated
+
+    // ScenarioReader for parsing entity nodes to get model_id and model3d
+    std::unique_ptr<scenarioengine::Entities>       temp_entities_;    // Temporary entities for parsing
+    std::unique_ptr<scenarioengine::Catalogs>       temp_catalogs_;    // Temporary catalogs for parsing
+    std::unique_ptr<scenarioengine::ScenarioReader> scenario_reader_;  // For parsing entity nodes
+};
