@@ -53,38 +53,39 @@ target_link_libraries(
     PRIVATE ${TIME_LIB})
 
 if(USE_OSG)
-if(MSVC)
-	set_target_properties(${TARGET} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$(SolutionDir)")
-    target_link_libraries(
-        ${TARGET}
-        PRIVATE ViewerBase
-                StudioViewerBase
-                PlayerBase
-                ScenarioEngine
-                CommonMini
-                Controllers
-                RoadManager
-                ${OSG_LIBRARIES}
-                ${SUMO_LIBRARIES}
-                ${IMPLOT_LIBRARIES}
-                ${SOCK_LIB}
-                )
-else()
-    target_link_libraries(
-        ${TARGET}
-        PRIVATE ViewerBase
-                StudioViewerBase
-                PlayerBase
-                ScenarioEngine
-                CommonMini
-                Controllers
-                RoadManager
-                ${OSG_LIBRARIES}
-                ${SUMO_LIBRARIES}
-                ${IMPLOT_LIBRARIES}
-                stdc++fs
-                )
-endif()
+    if(MSVC)
+        set_target_properties(
+            ${TARGET}
+            PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY
+                       "$(SolutionDir)")
+        target_link_libraries(
+            ${TARGET}
+            PRIVATE ViewerBase
+                    StudioViewerBase
+                    PlayerBase
+                    ScenarioEngine
+                    CommonMini
+                    Controllers
+                    RoadManager
+                    ${OSG_LIBRARIES}
+                    ${SUMO_LIBRARIES}
+                    ${IMPLOT_LIBRARIES}
+                    ${SOCK_LIB})
+    else()
+        target_link_libraries(
+            ${TARGET}
+            PRIVATE ViewerBase
+                    StudioViewerBase
+                    PlayerBase
+                    ScenarioEngine
+                    CommonMini
+                    Controllers
+                    RoadManager
+                    ${OSG_LIBRARIES}
+                    ${SUMO_LIBRARIES}
+                    ${IMPLOT_LIBRARIES}
+                    stdc++fs)
+    endif()
 endif()
 
 if(USE_OSI)

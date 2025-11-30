@@ -23,7 +23,7 @@
 #include "StudioGui.hpp"
 
 #include <osgUtil/SmoothingVisitor>
-#include <experimental/filesystem>
+#include <filesystem>
 #include <chrono>
 
 std::string                           g_xodr_path;
@@ -212,7 +212,7 @@ int main(int argc, char** argv)
     {
         LOG("Try to load the default OpenDRIVE file...");
         g_xodr_path = "../resources/xodr/e6mini.xodr";
-        if (!std::experimental::filesystem::exists(g_xodr_path))
+        if (!std::filesystem::exists(g_xodr_path))
             g_xodr_path = "resources/xodr/e6mini.xodr";
         if (!roadmanager::Position::LoadOpenDrive(g_xodr_path.c_str()))
         {

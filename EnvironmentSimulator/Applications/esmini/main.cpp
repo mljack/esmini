@@ -51,10 +51,12 @@ static int execute_scenario(int argc, char* argv[])
         }
 
         // Decorate window border with application name and arguments
-        SE_Options& opt = SE_Env::Inst().GetOptions();
-        player->viewer_->SetWindowTitleFromArgs(opt.GetOriginalArgs());
-
-        if (opt.GetOptionSet("return_nr_permutations"))
+        SE_Options& opt2 = SE_Env::Inst().GetOptions();
+#ifdef _USE_OSG
+        if (player->viewer_)
+            player->viewer_->SetWindowTitleFromArgs(opt2.GetOriginalArgs());
+#endif
+        if (opt2.GetOptionSet("return_nr_permutations"))
         {
             // Skip scenario, return immediately
             return static_cast<int>(OSCParameterDistribution::Inst().GetNumPermutations());

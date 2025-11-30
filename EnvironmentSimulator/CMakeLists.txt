@@ -96,15 +96,15 @@ set_folder(
     esmini-dyn
     ${ApplicationsFolder})
 set_folder(
-    scenariostudio
-    ${ApplicationsFolder})
-set_folder(
     dat2csv
     ${ApplicationsFolder})
 set_folder(
     odrplot
     ${ApplicationsFolder})
 if(USE_OSG)
+    set_folder(
+        scenariostudio
+        ${ApplicationsFolder})
     set_folder(
         replayer
         ${ApplicationsFolder})

@@ -16,7 +16,6 @@
 #include <string.h>
 #include <iostream>
 #include <fstream>
-#include <experimental/filesystem>
 #include <osgViewer/ViewerEventHandlers>
 #include <osgViewer/Viewer>
 #include <osg/MatrixTransform>
@@ -684,7 +683,7 @@ void StudioGui::RenderXmlTree()
         }
         ImGui::EndGroup();
 
-        ImGui::BeginChild("node", ImVec2(-FLT_MIN, -FLT_MIN), ImGuiChildFlags_Border);
+        ImGui::BeginChild("node", ImVec2(-FLT_MIN, -FLT_MIN));
         ImGui::PushItemWidth(TREE_VIEW_WIDTH);
         RenderXmlSubTree(data_model_.RootNode(), 0);
         ImGui::PopItemWidth();
@@ -752,7 +751,11 @@ void StudioGui::HandleAttrDialog()
                 {
                     new_attr_value = scenario_names[current_idx];
                 }
-                if (ImGui::Combo(attr_to_create_name.c_str(), &current_idx, get_enum, &scenario_names, scenario_names.size()))
+
+                std::vector<const char*> values;
+                for (auto& s : scenario_names)
+                    values.push_back(s.c_str());
+                if (ImGui::Combo(attr_to_create_name.c_str(), &current_idx, values.data(), enums.size()))
                 {
                     new_attr_value = scenario_names[current_idx];
                 }
@@ -769,7 +772,10 @@ void StudioGui::HandleAttrDialog()
                 if (enum_idx < 0)
                     enum_idx = 0;
             }
-            if (ImGui::Combo(attr_to_create_name.c_str(), &enum_idx, get_enum, &enums, enums.size()))
+            std::vector<const char*> values;
+            for (auto& e : enums)
+                values.push_back(e.c_str());
+            if (ImGui::Combo(attr_to_create_name.c_str(), &enum_idx, values.data(), enums.size()))
             {
                 new_attr_value = enums[enum_idx];
             }
@@ -1727,7 +1733,10 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
                         scenario_names.insert(scenario_names.begin(), current_value);
                         current_idx = 0;
                     }
-                    if (ImGui::Combo(attr.name(), &current_idx, get_enum, &scenario_names, scenario_names.size()))
+                    std::vector<const char*> values;
+                    for (auto& name : scenario_names)
+                        values.push_back(name.c_str());
+                    if (ImGui::Combo(attr.name(), &current_idx, values.data(), scenario_names.size()))
                     {
                         attr.set_value(scenario_names[current_idx].c_str());
                         SetModified();
@@ -1746,8 +1755,11 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
             }
             else if (!enums.empty())
             {
-                int enum_idx = find_enum_index(enums, attr.value());
-                if (ImGui::Combo(attr.name(), &enum_idx, get_enum, &enums, enums.size()))
+                int                      enum_idx = find_enum_index(enums, attr.value());
+                std::vector<const char*> values;
+                for (auto& e : enums)
+                    values.push_back(e.c_str());
+                if (ImGui::Combo(attr.name(), &enum_idx, values.data(), enums.size()))
                 {
                     attr.set_value(enums[enum_idx].c_str());
                     SetModified();

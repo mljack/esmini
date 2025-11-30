@@ -69,8 +69,10 @@ ScenarioPlayer::ScenarioPlayer(int argc, char* argv[])
     scenarioEngine       = nullptr;
     osiReporter          = nullptr;
     viewer_              = nullptr;
-    use_external_viewer  = false;
-    player_server_       = nullptr;
+#ifdef _USE_OSG
+    use_external_viewer = false;
+#endif
+    player_server_ = nullptr;
 
 #ifdef _USE_OSG
     viewerState_ = ViewerState::VIEWER_STATE_NOT_STARTED;
@@ -664,12 +666,14 @@ int ScenarioPlayer::AddCustomLightSource(double x, double y, double z, double in
 
 void ScenarioPlayer::CloseViewer()
 {
+#ifdef _USE_OSG
     if (!use_external_viewer)
     {
         delete viewer_;
     }
     viewer_             = nullptr;
     use_external_viewer = false;
+#endif
 
     viewerState_ = ScenarioPlayer::ViewerState::VIEWER_STATE_DONE;
 }
@@ -1080,8 +1084,10 @@ int ScenarioPlayer::InitViewer()
         }
     }
 
+#ifdef _USE_OSG
     if (!use_external_viewer)
         viewer_->RegisterKeyEventCallback(ReportKeyEvent, this);
+#endif
 
     viewerState_ = ViewerState::VIEWER_STATE_STARTED;
 
@@ -1275,11 +1281,13 @@ void ScenarioPlayer::PrintUsage()
 #endif
 }
 
+#ifdef _USE_OSG
 void ScenarioPlayer::RegisterExternalViewer(viewer::Viewer* viewer)
 {
     viewer_             = viewer;
     use_external_viewer = true;
 }
+#endif
 
 int ScenarioPlayer::Init()
 {

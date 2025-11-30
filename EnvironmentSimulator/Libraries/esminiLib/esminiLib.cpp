@@ -457,9 +457,12 @@ static int InitScenario()
             return -1;
         }
 
+#ifdef _USE_OSG
         // Decorate window border with application name and arguments
         SE_Options &opt = SE_Env::Inst().GetOptions();
-        player->viewer_->SetWindowTitleFromArgs(opt.GetOriginalArgs());
+        if (player->viewer_)
+            player->viewer_->SetWindowTitleFromArgs(opt.GetOriginalArgs());
+#endif
     }
     catch (const std::exception &e)
     {

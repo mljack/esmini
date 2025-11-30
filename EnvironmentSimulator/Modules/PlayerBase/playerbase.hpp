@@ -84,7 +84,9 @@ namespace scenarioengine
 
         ScenarioPlayer(int argc, char *argv[]);
         ~ScenarioPlayer();
+#ifdef _USE_OSG
         void RegisterExternalViewer(viewer::Viewer *viewer);
+#endif
         int  Init();
         void PrintUsage();
         bool IsQuitRequested()

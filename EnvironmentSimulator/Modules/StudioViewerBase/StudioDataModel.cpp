@@ -23,6 +23,7 @@
 #include <cctype>
 
 #ifdef __linux__
+#include <unistd.h>
 #else
 #ifndef NOMINMAX
 #define NOMINMAX

@@ -19,8 +19,6 @@
 #include "imgui_impl_opengl3.h"
 #include "StudioGui.hpp"
 
-#include <experimental/filesystem>
-
 #define PERSP_FOV 30.0
 #define ORTHO_FOV 1.0
 

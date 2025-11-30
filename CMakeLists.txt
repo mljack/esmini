@@ -1,13 +1,7 @@
-if(WIN32)
-    cmake_minimum_required(
-        VERSION 3.7.1 # for cmake generator VisualStudio 2017 support
-        # VERSION 3.14   # for cmake generator VisualStudio 2019 support VERSION 3.19   # for cmake presets support
-        FATAL_ERROR)
-else()
-    cmake_minimum_required(
-        VERSION 2.8.12...3.5
-        FATAL_ERROR)
-endif()
+cmake_minimum_required(
+    VERSION 3.10 # include_guard command was introduced
+    # VERSION 3.11 for VS 2017 generator, 3.14 for VS 2019, 3.21 for VS 2022
+    FATAL_ERROR)
 
 message(
     STATUS "CMake version: "

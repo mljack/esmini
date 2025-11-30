@@ -63,8 +63,16 @@ disable_static_analysis(${TARGET})
 disable_iwyu(${TARGET})
 enable_fpic(${TARGET})
 
-#if(UNIX AND NOT APPLE)
-#    find_package(X11 REQUIRED)
-#    target_link_libraries(${TARGET} PUBLIC ${X11_LIBRARIES})
-#    target_include_directories(${TARGET} PUBLIC ${X11_INCLUDE_DIR})
-#endif()
+if(UNIX
+   AND NOT
+       APPLE)
+    find_package(
+        X11
+        REQUIRED)
+    target_link_libraries(
+        ${TARGET}
+        PUBLIC ${X11_LIBRARIES})
+    target_include_directories(
+        ${TARGET}
+        PUBLIC ${X11_INCLUDE_DIR})
+endif()
