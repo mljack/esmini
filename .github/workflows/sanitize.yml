@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.1.7
         with:
-          ref: dev
+          ref: scenario_studio
           submodules: true
 
       - uses: ./.github/actions/setup_tools_shared
