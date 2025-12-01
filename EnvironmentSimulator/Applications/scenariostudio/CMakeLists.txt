@@ -102,3 +102,8 @@ disable_iwyu(${TARGET})
 install(
     TARGETS ${TARGET}
     DESTINATION "${INSTALL_PATH}")
+
+add_custom_command(
+    TARGET ${TARGET}
+    POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/../../../OpenSCENARIO.xsd ${INSTALL_PATH}/OpenSCENARIO.xsd)

@@ -164,6 +164,8 @@ bin/odrviewer?(.exe) \
 bin/replayer?(.exe) \
 bin/dat2csv?(.exe) \
 bin/odrplot?(.exe) \
+bin/scenariostudio?(.exe) \
+bin/OpenSCENARIO.xsd \
 bin/*esminiLib.* \
 EnvironmentSimulator/Applications/odrplot/xodr.py \
 EnvironmentSimulator/Libraries/esminiLib/esminiLib.hpp \
