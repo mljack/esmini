@@ -9,8 +9,9 @@ on:
       - master
       - dev
       - 'feature/**'
+      - scenario_studio
     tags:
-      - v[0-9]+.[0-9]+.[0-9]+
+      - scenario_studio_v[0-9]+.[0-9]+.[0-9]+
 
   pull_request:
     branches:
@@ -57,7 +58,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-22.04, macos-13, windows-2022]
+        os: [windows-2022]
         configuration: [Debug, Release]
 
     runs-on: ${{ matrix.os }}
@@ -154,7 +155,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-22.04, macos-13, windows-2022]
+        os: [windows-2022]
         configuration: [Debug, Release]
 
     runs-on: ${{ matrix.os }}
@@ -242,7 +243,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-22.04, macos-13, windows-2022]
+        os: [windows-2022]
 
     runs-on: ${{ matrix.os }}
 
@@ -275,8 +276,8 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          name: 'esmini ${{ steps.gitversion.outputs.majorMinorPatch }} (build ${{ env.BUILD_NUMBER }})'
-          body: 'Demo and binaries. For information about changes and new features see [release notes](https://github.com/esmini/esmini/blob/master/release_notes.md).'
+          name: 'Scenario Studio ${{ steps.gitversion.outputs.majorMinorPatch }} (build ${{ env.BUILD_NUMBER }})'
+          body: 'Demo and binaries. For information about changes and new features see [release notes](https://github.com/mljack/esmini/blob/master/scenario_studio_release_notes.md).'
           files: |
             esmini-bin_${{ runner.os }}.zip
             esmini-demo_${{ runner.os }}.zip
