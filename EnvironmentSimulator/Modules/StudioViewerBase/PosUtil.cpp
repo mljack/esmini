@@ -43,10 +43,24 @@ void ConvertWorldPosToLanePos(double  x,
 void ConvertLanePosToWorldPos(int road_id, int lane_id, double s, double offset, double rel_h, double* x, double* y, double* z, double* h)
 {
     roadmanager::Position pos = roadmanager::Position(road_id, lane_id, s, offset);
-    if (lane_id < 0)
-        pos.SetHeadingRelative(rel_h);
-    else
-        pos.SetHeadingRelative(rel_h + M_PI);
+
+    roadmanager::OpenDrive* odr = roadmanager::Position::GetOpenDrive();
+    if (odr)
+    {
+        roadmanager::Road* road = odr->GetRoadById(road_id);
+        if (road)
+        {
+            if ((lane_id < 0 && road->GetRule() == roadmanager::Road::RoadRule::RIGHT_HAND_TRAFFIC) ||
+                (lane_id > 0 && road->GetRule() == roadmanager::Road::RoadRule::LEFT_HAND_TRAFFIC))
+            {
+                pos.SetHeadingRelative(rel_h);
+            }
+            else
+            {
+                pos.SetHeadingRelative(rel_h + M_PI);
+            }
+        }
+    }
     *x = pos.GetX();
     *y = pos.GetY();
     *z = pos.GetZ();

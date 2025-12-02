@@ -588,6 +588,7 @@ namespace viewer
             return osg_screenshot_event_handler_;
         }
 
+        bool LoadOpenDrive(const std::string& filename);
         void Frame();
 
     private:

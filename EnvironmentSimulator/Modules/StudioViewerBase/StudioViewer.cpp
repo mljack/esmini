@@ -64,6 +64,8 @@ public:
 
 using namespace viewer;
 
+const double StudioViewer::DEFAULT_ZOOM_DIST = 50000;
+
 StudioViewer::StudioViewer(roadmanager::OpenDrive* odrManager,
                            const char*             modelFilename,
                            const char*             scenarioFilename,
@@ -102,6 +104,11 @@ StudioViewer::StudioViewer(roadmanager::OpenDrive* odrManager,
 
     osgViewer_->getCamera()->setLODScale(static_cast<float>(fov / PERSP_FOV));
 
+    SetupBound();
+}
+
+void StudioViewer::SetupBound()
+{
     osg::BoundingSphere bounding_sphere;
     if (environment_ != nullptr)
     {
@@ -293,4 +300,17 @@ void StudioViewer::SetViewportSize(double width, double height)
 void StudioViewer::SetViewportCenterPixelOffset(double x, double y)
 {
     topViewManipulator_->setViewportCenterPixelOffset(x, y);
+}
+
+bool StudioViewer::LoadOpenDrive(const std::string& filename)
+{
+    if (Viewer::LoadOpenDrive(filename))
+    {
+        SetupBound();
+        return true;
+    }
+    else
+    {
+        return false;
+    }
 }

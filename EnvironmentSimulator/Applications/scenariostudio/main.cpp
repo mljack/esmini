@@ -39,8 +39,7 @@ static unsigned int                   fixed_timestep = 50;
 StudioDataModel*                      g_data_model   = nullptr;
 std::unique_ptr<viewer::StudioViewer> g_viewer;
 
-const double DEFAULT_ZOOM_DIST      = 50000;
-const float  DEFAULT_TIMELINE_RANGE = 20.0f;
+const float DEFAULT_TIMELINE_RANGE = 20.0f;
 
 static bool g_quit  = false;
 static bool g_pause = false;
@@ -251,7 +250,7 @@ int main(int argc, char** argv)
     g_viewer->SetNodeMaskBits(viewer::NodeMask::NODE_MASK_INFO_PER_OBJ);
 
     g_viewer->SetWindowTitle("Scenario Studio");
-    g_viewer->SetCameraDistance(DEFAULT_ZOOM_DIST);
+    g_viewer->SetCameraDistance(viewer::StudioViewer::DEFAULT_ZOOM_DIST);
 
     std::unique_ptr<ScenarioPlayer> player;
 

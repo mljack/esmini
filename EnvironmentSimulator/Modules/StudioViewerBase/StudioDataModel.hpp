@@ -124,6 +124,7 @@ public:
     {
         return !redo_stack_.empty();
     }
+    void ClearUndoRedoStacks();
 
     struct ValidationError
     {
@@ -177,7 +178,6 @@ private:
     void EnsureUniqueNamesForSubtree(pugi::xml_node node);
 
     void PushUndoState();
-    void ClearUndoRedoStacks();
 
     void UpdateEsminiSettings();
 

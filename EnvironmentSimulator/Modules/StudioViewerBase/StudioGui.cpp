@@ -74,6 +74,7 @@ namespace
     std::vector<SubelementInfo> elements_to_create;  // Now using SubelementInfo to store content model type
 
     std::vector<std::string> scenario_filter = {"OpenSCENARIO Files", "*.xosc"};
+    std::vector<std::string> map_filter      = {"OpenDRIVE Files", "*.xodr"};
 
     // Check for attribute value dialog to open (in the main loop, not inside RenderNodeModifyMenu)
     bool        attr_value_dialog_to_open = false;
@@ -1080,18 +1081,19 @@ void StudioGui::RenderMenuBar()
 
     if (ImGui::BeginMainMenuBar())
     {
+        bool in_composer_mode = (data_model_.mode_ == StudioMode::COMPOSER);
         if (ImGui::BeginMenu("File"))
         {
-            if (ImGui::MenuItem("Clear"))
+            if (ImGui::MenuItem("Clear", nullptr, false, in_composer_mode))
             {
                 data_model_.Clear();
                 positions_extracted_       = false;
                 to_reset_camera_pos_       = true;
                 scenario_object_map_dirty_ = true;
             }
-            if (ImGui::MenuItem("Open..."))
+            if (ImGui::MenuItem("Open an OpenSCENARIO File ...", nullptr, false, in_composer_mode))
             {
-                auto result = pfd::open_file("Choose an OpenSCENARIO file", "", scenario_filter).result();
+                auto result = pfd::open_file("Choose an OpenSCENARIO File", "", scenario_filter).result();
                 if (!result.empty())
                 {
                     if (data_model_.LoadXoscXml(result[0]))
@@ -1106,11 +1108,28 @@ void StudioGui::RenderMenuBar()
             }
             if (ImGui::MenuItem("Save", "Ctrl+S"))
                 to_save_file = true;
-            if (ImGui::MenuItem("Save as..."))
+            if (ImGui::MenuItem("Save As..."))
             {
                 to_save_file = true;
                 backup_path  = data_model_.xosc_path_;
                 data_model_.xosc_path_.clear();
+            }
+            if (ImGui::MenuItem("Open an OpenDRIVE File ...", nullptr, false, in_composer_mode))
+            {
+                auto result = pfd::open_file("Choose an OpenDRIVE File", "", map_filter).result();
+                if (!result.empty())
+                {
+                    if (viewer_->LoadOpenDrive(result[0]))
+                    {
+                        positions_extracted_ = false;
+                        to_reset_camera_pos_ = true;
+                        data_model_.ClearUndoRedoStacks();
+                    }
+                    else
+                    {
+                        LOG("Failed to load OpenDRIVE file: %s", result[0].c_str());
+                    }
+                }
             }
             if (ImGui::MenuItem("Exit"))
                 Exit();
@@ -1139,16 +1158,16 @@ void StudioGui::RenderMenuBar()
 
         if (ImGui::BeginMenu("Edit"))
         {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, data_model_.CanUndo()))
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, data_model_.CanUndo() && in_composer_mode))
             {
                 Undo();
             }
-            if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, data_model_.CanRedo()))
+            if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, data_model_.CanRedo() && in_composer_mode))
             {
                 Redo();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Validate Scenario"))
+            if (ImGui::MenuItem("Validate Scenario", nullptr, false, in_composer_mode))
             {
                 data_model_.ValidateScenario();
                 show_validation_window_ = true;
@@ -1174,6 +1193,8 @@ void StudioGui::RenderMenuBar()
 
 void StudioGui::Undo()
 {
+    if (data_model_.mode_ != StudioMode::COMPOSER)
+        return;
     data_model_.Undo();
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
@@ -1181,6 +1202,8 @@ void StudioGui::Undo()
 
 void StudioGui::Redo()
 {
+    if (data_model_.mode_ != StudioMode::COMPOSER)
+        return;
     data_model_.Redo();
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
@@ -1414,30 +1437,33 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             // Handle mouse click events for vehicle/object picking
             if (!wantCaptureMouse && ea.getEventType() == osgGA::GUIEventAdapter::PUSH)
             {
-                if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
+                if (data_model_.mode_ == StudioMode::COMPOSER)
                 {
-                    // Left mouse button - existing functionality
-                    auto* pos_info = PickPosition();
-                    if (!pos_info)
+                    if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
                     {
-                        ClearXmlHighlights();
-                        data_model_.markers_to_update_ = true;
-                    }
-                    // Clear any existing move operation if right-clicking empty space
-                    if (move_operation_active_)
-                    {
-                        EndMoveOperation();
-                        SetModified();
-                    }
-                }
-                else if (ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
-                {
-                    if (!move_operation_active_)
-                    {
-                        // Right mouse button - new functionality for move context menu
+                        // Left mouse button - existing functionality
                         auto* pos_info = PickPosition();
-                        if (pos_info)
-                            move_context_menu_to_open_ = true;
+                        if (!pos_info)
+                        {
+                            ClearXmlHighlights();
+                            data_model_.markers_to_update_ = true;
+                        }
+                        // Clear any existing move operation if right-clicking empty space
+                        if (move_operation_active_)
+                        {
+                            EndMoveOperation();
+                            SetModified();
+                        }
+                    }
+                    else if (ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
+                    {
+                        if (!move_operation_active_)
+                        {
+                            // Right mouse button - new functionality for move context menu
+                            auto* pos_info = PickPosition();
+                            if (pos_info)
+                                move_context_menu_to_open_ = true;
+                        }
                     }
                 }
             }
@@ -1643,10 +1669,18 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
 
     if (strcmp(node.name(), "WorldPosition") == 0 || strcmp(node.name(), "LanePosition") == 0 || strcmp(node.name(), "RelativeLanePosition") == 0)
     {
+        bool disabled3 = (data_model_.mode_ != StudioMode::COMPOSER);
+        if (disabled3)
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, GImGui->Style.Alpha * GImGui->Style.DisabledAlpha);
+
         ImGui::SameLine();
-        bool find_it = ImGui::SmallButton("Find It");
+        bool find_it = (ImGui::SmallButton("Find It") && !disabled3);
         ImGui::SameLine();
-        bool place_it = ImGui::SmallButton("Move It");
+        bool place_it = (ImGui::SmallButton("Move It") && !disabled3);
+
+        if (disabled3)
+            ImGui::PopStyleVar();
+
         if (find_it || place_it)
         {
             auto iter =
@@ -3345,7 +3379,7 @@ void StudioGui::RenderValidationReport()
     {
         if (data_model_.validation_errors_.empty())
         {
-            ImGui::TextColored(ImVec4(0, 1, 0, 1), "No errors found. Scenario is valid.");
+            ImGui::TextColored(ImVec4(0, 1, 0, 1), "No errors were found. Scenario is valid.");
         }
         else
         {

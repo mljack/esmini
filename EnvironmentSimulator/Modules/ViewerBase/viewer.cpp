@@ -4010,3 +4010,104 @@ bool ViewerEventHandler::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActi
         return false;
     }
 }
+
+bool Viewer::LoadOpenDrive(const std::string& filename)
+{
+    if (odrManager_ == nullptr)
+        return false;
+
+    // Load the OpenDRIVE file
+    if (!odrManager_->LoadOpenDriveFile(filename.c_str(), /*replace = */ true))
+    {
+        return false;
+    }
+
+    // 1. Clean up old road network OSG models
+    if (roadGeom)
+    {
+        if (roadGeom->root_)
+            envGroup_->removeChild(roadGeom->root_);
+        roadGeom.reset();
+    }
+
+    if (odrLines_)
+        odrLines_->removeChildren(0, odrLines_->getNumChildren());
+
+    if (osiFeatures_)
+        osiFeatures_->removeChildren(0, osiFeatures_->getNumChildren());
+
+    if (trajectoryLines_)
+        trajectoryLines_->removeChildren(0, trajectoryLines_->getNumChildren());
+
+    if (routewaypoints_)
+        routewaypoints_->removeChildren(0, routewaypoints_->getNumChildren());
+
+    if (env_origin2odr_)
+        env_origin2odr_->removeChildren(0, env_origin2odr_->getNumChildren());
+
+    if (trails_)
+        trails_->removeChildren(0, trails_->getNumChildren());
+
+    if (osiFeatures_)
+        osiFeatures_->removeChildren(0, osiFeatures_->getNumChildren());
+
+    polyLine_.clear();
+
+    // 2. Create new road network OSG models
+
+    // establish origin of the road network, pick coordinates of the first lane OSI point
+    origin_ = {0.0, 0.0, 0.0};
+    if (odrManager_->GetNumOfRoads() > 0)
+    {
+        if (odrManager_->GetRoadByIdx(0))
+        {
+            if (odrManager_->GetRoadByIdx(0)->GetLaneSectionByIdx(0))
+            {
+                if (odrManager_->GetRoadByIdx(0)->GetLaneSectionByIdx(0)->GetLaneByIdx(0))
+                {
+                    origin_[0] = odrManager_->GetRoadByIdx(0)->GetLaneSectionByIdx(0)->GetLaneByIdx(0)->GetOSIPoints()->GetXfromIdx(0);
+                    origin_[1] = odrManager_->GetRoadByIdx(0)->GetLaneSectionByIdx(0)->GetLaneByIdx(0)->GetOSIPoints()->GetYfromIdx(0);
+                }
+            }
+        }
+    }
+    env_origin2odr_->setMatrix(osg::Matrix::translate(origin_));
+    root_origin2odr_->setMatrix(osg::Matrix::translate(origin_));
+
+    // Create RoadGeom
+    roadGeom = std::make_unique<RoadGeom>(odrManager_, origin_);
+    if (roadGeom && roadGeom->root_)
+    {
+        environment_ = roadGeom->root_;  // Update environment pointer
+        env_origin2odr_->addChild(environment_);
+
+        // Since the generated 3D model is based on OSI features, let's hide those by default if we have a road model
+        ClearNodeMaskBits(NodeMask::NODE_MASK_ODR_FEATURES);
+        ClearNodeMaskBits(NodeMask::NODE_MASK_OSI_LINES);
+    }
+
+    // Create road lines
+    if (odrManager_->GetNumOfRoads() > 0)
+    {
+        if (!CreateRoadLines(this, odrManager_))
+        {
+            LOG("Failed to create road lines!");
+            return false;
+        }
+
+        if (!CreateRoadMarkLines(odrManager_))
+        {
+            LOG("Failed to create road mark lines!");
+            return false;
+        }
+
+        if (CreateRoadSignsAndObjects(odrManager_) != 0)
+        {
+            LOG("Failed to create road signs and objects!");
+            return false;
+        }
+    }
+
+    LOG("Successfully loaded OpenDRIVE file: %s", filename.c_str());
+    return true;
+}

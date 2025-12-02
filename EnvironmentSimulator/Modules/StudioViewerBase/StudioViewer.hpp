@@ -37,6 +37,8 @@ namespace viewer
     class StudioViewer : public viewer::Viewer
     {
     public:
+        static const double DEFAULT_ZOOM_DIST;
+
         StudioViewer(roadmanager::OpenDrive* odrManager,
                      const char*             modelFilename,
                      const char*             scenarioFilename,
@@ -58,6 +60,7 @@ namespace viewer
         void              SetCameraDistance(double d);
         void              SetViewportSize(double width, double height);
         void              SetViewportCenterPixelOffset(double x, double y);
+        bool              LoadOpenDrive(const std::string& filename);
         StudioDataModel*  GetDataModel()
         {
             return data_model_;
@@ -69,6 +72,8 @@ namespace viewer
         }
 
     private:
+        void SetupBound();
+
         osg::ref_ptr<osgGA::TopViewManipulator> topViewManipulator_;
         StudioDataModel*                        data_model_;
         class StudioGui*                        studio_gui_;
