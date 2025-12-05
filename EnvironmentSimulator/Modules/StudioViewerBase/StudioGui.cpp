@@ -108,6 +108,14 @@ namespace
 int         find_enum_index(const std::vector<std::string>& enums, const char* value);
 const char* get_enum(void* user_data, int idx);
 
+// Helper function to normalize path by replacing backslashes with forward slashes
+static std::string normalize_path(const std::string& path)
+{
+    std::string normalized = path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    return normalized;
+}
+
 namespace
 {
     struct ImGuiNewFrameCallback : public osg::Camera::DrawCallback
@@ -1839,6 +1847,11 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
             {
                 std::string buf(attr.value());
                 buf.resize(512);
+
+                // Check if this is a path or filepath attribute
+                bool is_path_attr     = (attr_name == "path");
+                bool is_filepath_attr = (attr_name == "filepath");
+
                 if (ImGui::InputText(attr.name(), buf.data(), buf.size()))
                 {
                     std::string new_value(buf.c_str());
@@ -1860,6 +1873,44 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
                     }
                     attr.set_value(new_value.c_str());
                     SetModified();
+                }
+
+                // Add "choose" button for path/filepath attributes
+                if (is_path_attr || is_filepath_attr)
+                {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("choose"))
+                    {
+                        std::string selected_path;
+                        if (is_path_attr)
+                        {
+                            // Use folder selection dialog
+                            auto result = pfd::select_folder("Select Folder", "").result();
+                            if (!result.empty())
+                            {
+                                selected_path = normalize_path(result);
+                            }
+                        }
+                        else  // is_filepath_attr
+                        {
+                            // Use file selection dialog
+                            std::vector<std::string> empty;
+                            bool                     is_map_path = (strcmp(node.name(), "LogicFile") == 0);
+                            is_map_path &= node.parent() && strcmp(node.parent().name(), "RoadNetwork") == 0;
+                            is_map_path &= node.parent() && node.parent().parent() && strcmp(node.parent().parent().name(), "OpenSCENARIO") == 0;
+                            auto result = pfd::open_file("Select File", "", is_map_path ? map_filter : empty).result();
+                            if (!result.empty())
+                            {
+                                selected_path = normalize_path(result[0]);
+                            }
+                        }
+
+                        if (!selected_path.empty())
+                        {
+                            attr.set_value(selected_path.c_str());
+                            SetModified();
+                        }
+                    }
                 }
             }
             if (scroll_to_attr)
