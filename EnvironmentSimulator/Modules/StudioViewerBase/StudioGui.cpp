@@ -972,12 +972,11 @@ void StudioGui::HandleNodeDialog()
             new_pos = cursor_x;
         ImGui::SetCursorPosX(new_pos);
 
-        bool ok_confirmed = ImGui::Button("OK", ImVec2(ok_width, 0.0f));
+        bool ok_confirmed = elements_to_remove.empty() || ImGui::Button("OK", ImVec2(ok_width, 0.0f));
         if (ImGui::IsKeyPressedMap(ImGuiKey_Enter))
             ok_confirmed = true;
         pugi::xml_node source_node = temp_doc.child("temp").first_child();
-        bool           is_pos_node = (strcmp(source_node.name(), "LanePosition") == 0 || strcmp(source_node.name(), "WorldPosition") == 0);
-        if (ok_confirmed || is_pos_node)
+        if (ok_confirmed)
         {
             pugi::xml_node new_node = modify_menu_context_node.append_copy(source_node);
 
@@ -991,7 +990,7 @@ void StudioGui::HandleNodeDialog()
 
             node_creation_active = false;
             ImGui::CloseCurrentPopup();
-            if (is_pos_node)
+            if (strcmp(source_node.name(), "LanePosition") == 0 || strcmp(source_node.name(), "WorldPosition") == 0)
             {
                 data_model_.ExtractPositionsRecursive(data_model_.xml_doc_, "", &extracted_positions_);
                 auto iter = std::find_if(extracted_positions_.begin(),
