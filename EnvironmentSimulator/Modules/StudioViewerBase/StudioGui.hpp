@@ -116,6 +116,8 @@ private:
     void Undo();
     void Redo();
 
+    void TryLoadOpenDriveFromScenario();
+
     double time_;
     bool   left_mouse_pressed_   = false;
     bool   right_mouse_pressed_  = false;

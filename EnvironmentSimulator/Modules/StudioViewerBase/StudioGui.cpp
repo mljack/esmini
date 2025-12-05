@@ -1111,6 +1111,9 @@ void StudioGui::RenderMenuBar()
                         if (data_model_.mode_ != StudioMode::COMPOSER)
                             SwitchToComposer();
                         to_reset_camera_pos_ = true;
+
+                        // Automatically try to load the OpenDRIVE file referenced in the scenario
+                        TryLoadOpenDriveFromScenario();
                     }
                 }
             }
@@ -1215,6 +1218,122 @@ void StudioGui::Redo()
     data_model_.Redo();
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
+}
+
+void StudioGui::TryLoadOpenDriveFromScenario()
+{
+    // Extract the filepath from OpenSCENARIO/RoadNetwork/LogicFile/@filepath
+    pugi::xml_node root_node = data_model_.RootNode();
+    if (root_node.empty())
+        return;
+
+    pugi::xml_node road_network = root_node.child("RoadNetwork");
+    if (road_network.empty())
+        return;
+
+    pugi::xml_node logic_file = road_network.child("LogicFile");
+    if (logic_file.empty())
+        return;
+
+    pugi::xml_attribute filepath_attr = logic_file.attribute("filepath");
+    if (filepath_attr.empty())
+        return;
+
+    std::string filepath = filepath_attr.value();
+    if (filepath.empty())
+        return;
+
+    // Extract filename from filepath (ignore path part)
+    std::string filename = FileNameOf(filepath);
+
+    // Get currently loaded OpenDRIVE filename
+    roadmanager::OpenDrive* odr = roadmanager::Position::GetOpenDrive();
+    if (odr != nullptr)
+    {
+        std::string current_odr_filename = FileNameOf(odr->GetOpenDriveFilename());
+
+        // If filenames match, no need to reload
+        if (current_odr_filename == filename)
+        {
+            LOG("OpenDRIVE file [%s] is already loaded.", filename.c_str());
+            return;
+        }
+    }
+
+    // Try to load the OpenDRIVE file
+    bool        loaded = false;
+    std::string loaded_path;
+
+    // Check if filepath is absolute
+    if (FileExists(filepath.c_str()))
+    {
+        // Absolute path exists, try to load directly
+        if (viewer_->LoadOpenDrive(filepath))
+        {
+            loaded      = true;
+            loaded_path = filepath;
+            LOG("Successfully loaded OpenDRIVE from absolute path: [%s]", filepath.c_str());
+        }
+    }
+    else
+    {
+        // Try relative paths using SE_Env search paths
+        const std::vector<std::string>& search_paths = SE_Env::Inst().GetPaths();
+
+        for (const auto& search_path : search_paths)
+        {
+            std::string candidate_path = search_path + "/" + filepath;
+            candidate_path             = normalize_path(candidate_path);
+
+            if (FileExists(candidate_path.c_str()))
+            {
+                if (viewer_->LoadOpenDrive(candidate_path))
+                {
+                    loaded      = true;
+                    loaded_path = candidate_path;
+                    LOG("Successfully loaded OpenDRIVE from: [%s]", candidate_path.c_str());
+                    break;
+                }
+            }
+        }
+    }
+
+    // If loading failed, prompt user to manually select the file
+    if (!loaded)
+    {
+        LOG("Failed to automatically load OpenDRIVE file: [%s]", filepath.c_str());
+        LOG("Please manually select the OpenDRIVE file.");
+
+        filepath   = normalize_path(filepath);
+        size_t cur = filepath.rfind('/');
+        if (cur != std::string::npos)
+            filepath = filepath.substr(cur + 1);
+        std::vector<std::string> filter = {filepath, filepath};
+        std::string              title  = "Choose the OpenDRIVE File[";
+        title += filepath + "]";
+        auto result = pfd::open_file(title, "", filter).result();
+        if (!result.empty())
+        {
+            if (viewer_->LoadOpenDrive(result[0]))
+            {
+                LOG("Successfully loaded OpenDRIVE file: [%s]", result[0].c_str());
+                positions_extracted_ = false;
+                to_reset_camera_pos_ = true;
+                data_model_.ClearUndoRedoStacks();
+            }
+            else
+            {
+                LOG("Failed to load OpenDRIVE file: [%s]", result[0].c_str());
+            }
+        }
+    }
+    else
+    {
+        // Successfully loaded, update viewer state
+        positions_extracted_ = false;
+        to_reset_camera_pos_ = true;
+        data_model_.ClearUndoRedoStacks();
+    }
 }
 
 void StudioGui::RenderTimeline()
