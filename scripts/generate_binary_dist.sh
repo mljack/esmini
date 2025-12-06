@@ -2,9 +2,9 @@
 
 shopt -s extglob
 
-rm -rf esmini-demo 
+rm -rf scenariostudio
 
-mkdir esmini-demo
+mkdir scenariostudio
 
 tar -c -p \
 resources/xosc/follow_ghost.xosc \
@@ -157,7 +157,7 @@ docs/readme.txt \
 docs/commands.txt \
 3rd_party_terms_and_licenses/* \
 LICENSE \
-release_notes.md \
+scenario_studio_release_notes.md \
 version.txt \
 bin/esmini?(.exe) \
 bin/odrviewer?(.exe) \
@@ -170,4 +170,11 @@ bin/*esminiLib.* \
 EnvironmentSimulator/Applications/odrplot/xodr.py \
 EnvironmentSimulator/Libraries/esminiLib/esminiLib.hpp \
 Hello-World_coding-example/* \
-| tar -p -C esmini-demo -x
+docs/hud.png \
+docs/expression.png \
+docs/position_and_path.png \
+docs/xml_context_menu.png \
+docs/scenario_studio_ui.png \
+README.md \
+README_CN.md \
+| tar -p -C scenariostudio -x

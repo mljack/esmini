@@ -253,16 +253,9 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      # Generate build number based on offset from former AppVeyor CI machine
-      - uses: ./.github/actions/generate_offset_run_number
-
       - uses: actions/download-artifact@v4.1.7
         with:
-          name: esmini-bin_${{ runner.os }}
-
-      - uses: actions/download-artifact@v4.1.7
-        with:
-          name: esmini-demo_${{ runner.os }}
+          name: scenariostudio_${{ runner.os }}
 
       - name: Install GitVersion
         uses: gittools/actions/gitversion/setup@v0.9.7
@@ -276,8 +269,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          name: 'Scenario Studio ${{ steps.gitversion.outputs.majorMinorPatch }} (build ${{ env.BUILD_NUMBER }})'
-          body: 'Demo and binaries. For information about changes and new features see [release notes](https://github.com/mljack/esmini/blob/master/scenario_studio_release_notes.md).'
+          name: 'Scenario Studio ${{ steps.gitversion.outputs.majorMinorPatch }}'
+          body: 'See [release notes](https://github.com/mljack/scenariostudio/blob/scenario_studio/scenario_studio_release_notes.md) for more information.'
           files: |
-            esmini-bin_${{ runner.os }}.zip
-            esmini-demo_${{ runner.os }}.zip
+            scenariostudio_${{ runner.os }}.zip

@@ -31,16 +31,6 @@ runs:
       shell: bash
       run: sudo chmod -R +x ./esmini/bin/
 
-    - name: Archive release binaries
-      shell: bash
-      run: 7z a esmini-bin_${{ runner.os }}.zip esmini/*
-
-    - name: Upload release artifact
-      uses: actions/upload-artifact@v4.3.6
-      with:
-        name: esmini-bin_${{ runner.os }}
-        path: esmini-bin_${{ runner.os }}.zip
-
     - name: Copy demo artifacts to esmini prefix folder structure
       shell: bash
       run: >
@@ -49,16 +39,16 @@ runs:
     - name: Make scripts and binaries runnable for Demo - Unix
       if: runner.os == 'macOS' || runner.os == 'Linux'
       shell: bash
-      run: sudo chmod -R +x ./esmini-demo/run/
-        && sudo chmod -R +x ./esmini-demo/scripts/
-        && sudo chmod -R +x ./esmini-demo/bin/
+      run: sudo chmod -R +x ./scenariostudio/run/
+        && sudo chmod -R +x ./scenariostudio/scripts/
+        && sudo chmod -R +x ./scenariostudio/bin/
 
     - name: Archive demo binaries
       shell: bash
-      run: 7z a esmini-demo_${{ runner.os }}.zip esmini-demo/*
+      run: 7z a scenariostudio_${{ runner.os }}.zip scenariostudio/*
 
     - name: Upload demo artifact
       uses: actions/upload-artifact@v4.3.6
       with:
-        name: esmini-demo_${{ runner.os }}
-        path: esmini-demo_${{ runner.os }}.zip
+        name: scenariostudio_${{ runner.os }}
+        path: scenariostudio_${{ runner.os }}.zip
