@@ -74,7 +74,7 @@ std::string GetConfigFilePath()
     size_t      last_slash = exe_path.find_last_of("\\/");
     std::string exe_dir    = exe_path.substr(0, last_slash);
 
-    return exe_dir + "/config.json";
+    return exe_dir + "/config.ini";
 }
 
 bool LoadConfigValue(const std::string& key, int& value)
