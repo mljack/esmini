@@ -80,6 +80,10 @@ public:
     bool           MoveNodeDown(pugi::xml_node node);
     pugi::xml_node DuplicateNode(pugi::xml_node node);
 
+    bool        DeleteEntity(const std::string& entity_name);
+    std::string CloneEntity(const std::string& entity_name);
+    bool        RenameEntity(const std::string& old_name, const std::string& new_name);
+
     void        AssignDefaultName(pugi::xml_node node);
     bool        NameExists(const std::string& name, const pugi::xml_node exclude_node) const;
     std::string GenerateUniqueName(const std::string& base, const pugi::xml_node exclude_node) const;

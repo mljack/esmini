@@ -88,6 +88,12 @@ namespace
     bool               node_creation_active = false;
     pugi::xml_document temp_doc;
 
+    // Rename entity dialog variables
+    bool        rename_dialog_to_open = false;
+    bool        rename_dialog_active  = false;
+    std::string rename_old_name;
+    std::string rename_new_name;
+
     bool to_save_file               = false;
     bool attr_context_menu_launched = false;
 
@@ -1032,6 +1038,128 @@ void StudioGui::HandleMovePositionMenu()
         {
             StartMoveOperation(&last_picked_position_info_);
         }
+
+        // Heading editing is only supported for LanePosition and WorldPosition
+        bool can_modify_heading =
+            (last_picked_position_info_.type == PositionType::LANE_POSITION || last_picked_position_info_.type == PositionType::WORLD_POSITION);
+        if (ImGui::MenuItem("Modify Heading", nullptr, false, can_modify_heading))
+        {
+            StartHeadingOperation(last_picked_position_info_);
+        }
+
+        const std::string entity_name = last_picked_position_info_.name;
+        bool              is_ego      = (entity_name == "ego" || entity_name == "Ego" || entity_name == "EGO");
+
+        if (ImGui::MenuItem("Clone", nullptr, false, !entity_name.empty()))
+        {
+            std::string new_name = data_model_.CloneEntity(entity_name);
+            if (!new_name.empty())
+            {
+                scenario_object_map_dirty_ = true;
+                ClearXmlHighlights();
+                ExtractPositionsFromXml();
+
+                // Pick the clone's init position and let the mouse move it
+                auto iter = std::find_if(extracted_positions_.begin(),
+                                         extracted_positions_.end(),
+                                         [&](const PositionInfo& info) { return info.name == new_name; });
+                if (iter != extracted_positions_.end())
+                {
+                    for (auto& info : extracted_positions_)
+                        info.selected = false;
+                    iter->selected             = true;
+                    last_picked_position_info_ = *iter;
+                    HighlightXmlNodeForPosition(*iter);
+                    StartMoveOperation(&last_picked_position_info_);
+                }
+                data_model_.markers_to_update_ = true;
+            }
+        }
+
+        // Ego must not be renamed
+        if (ImGui::MenuItem("Rename", nullptr, false, !entity_name.empty() && !is_ego))
+        {
+            rename_old_name       = entity_name;
+            rename_new_name       = entity_name;
+            rename_dialog_to_open = true;
+        }
+
+        // Ego must not be deleted
+        if (ImGui::MenuItem("Delete", nullptr, false, !entity_name.empty() && !is_ego))
+        {
+            if (data_model_.DeleteEntity(entity_name))
+            {
+                scenario_object_map_dirty_ = true;
+                ClearXmlHighlights();
+                last_picked_position_info_ = PositionInfo();
+                ExtractPositionsFromXml();
+                data_model_.markers_to_update_ = true;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // Handle the entity rename dialog (deferred open, mirroring HandleAttrDialog)
+    if (rename_dialog_to_open)
+    {
+        rename_dialog_to_open = false;
+        rename_dialog_active  = true;
+        ImGui::OpenPopup("Rename Entity");
+    }
+
+    ImGuiIO& io     = ImGui::GetIO();
+    ImVec2   center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Rename Entity", &rename_dialog_active, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("Rename to");
+        ImGui::SameLine();
+        if (ImGui::IsWindowAppearing())
+            ImGui::SetKeyboardFocusHere();
+        rename_new_name.resize(256);
+        ImGui::InputText("##rename_to", rename_new_name.data(), rename_new_name.size(), ImGuiInputTextFlags_AutoSelectAll);
+
+        std::string new_name     = rename_new_name.c_str();
+        bool        is_duplicate = false;
+        if (new_name != rename_old_name)
+        {
+            auto names   = data_model_.GetScenarioObjectNames();
+            is_duplicate = (std::find(names.begin(), names.end(), new_name) != names.end());
+        }
+
+        if (is_duplicate)
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "An entity named '%s' already exists.", new_name.c_str());
+
+        bool can_confirm = !new_name.empty() && new_name != rename_old_name && !is_duplicate;
+
+        if (!can_confirm)
+            ImGui::BeginDisabled(true);
+        bool confirmed = ImGui::Button("Confirm", ImVec2(120, 0));
+        if (!can_confirm)
+            ImGui::EndDisabled();
+        if (can_confirm && ImGui::IsKeyPressedMap(ImGuiKey_Enter))
+            confirmed = true;
+
+        if (confirmed)
+        {
+            if (data_model_.RenameEntity(rename_old_name, new_name))
+            {
+                scenario_object_map_dirty_ = true;
+                ClearXmlHighlights();
+                last_picked_position_info_ = PositionInfo();
+                ExtractPositionsFromXml();
+                data_model_.markers_to_update_ = true;
+            }
+            rename_dialog_active = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressedMap(ImGuiKey_Escape))
+        {
+            rename_dialog_active = false;
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 }
@@ -1529,7 +1657,9 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             }
             else if (!isKeyDown && c == osgGA::GUIEventAdapter::KEY_Escape && !wantCaptureKeyboard)
             {
-                if (data_model_.mode_ != StudioMode::COMPOSER)
+                if (heading_operation_active_)
+                    CancelHeadingOperation();
+                else if (data_model_.mode_ != StudioMode::COMPOSER)
                     SwitchToComposer();
             }
 
@@ -1567,23 +1697,36 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                 {
                     if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
                     {
-                        // Left mouse button - existing functionality
-                        auto* pos_info = PickPosition();
-                        if (!pos_info)
+                        if (heading_operation_active_)
                         {
-                            ClearXmlHighlights();
-                            data_model_.markers_to_update_ = true;
+                            // Left click confirms the heading modification
+                            ConfirmHeadingOperation();
                         }
-                        // Clear any existing move operation if right-clicking empty space
-                        if (move_operation_active_)
+                        else
                         {
-                            EndMoveOperation();
-                            SetModified();
+                            // Left mouse button - existing functionality
+                            auto* pos_info = PickPosition();
+                            if (!pos_info)
+                            {
+                                ClearXmlHighlights();
+                                data_model_.markers_to_update_ = true;
+                            }
+                            // Clear any existing move operation if right-clicking empty space
+                            if (move_operation_active_)
+                            {
+                                EndMoveOperation();
+                                SetModified();
+                            }
                         }
                     }
                     else if (ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
                     {
-                        if (!move_operation_active_)
+                        if (heading_operation_active_)
+                        {
+                            // Right click cancels the heading modification and restores the original value
+                            CancelHeadingOperation();
+                        }
+                        else if (!move_operation_active_)
                         {
                             // Right mouse button - new functionality for move context menu
                             auto* pos_info = PickPosition();
@@ -1603,6 +1746,12 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             if (move_operation_active_)
             {
                 UpdateMoveOperation();
+            }
+
+            // Track the mouse direction while modifying a heading
+            if (heading_operation_active_)
+            {
+                UpdateHeadingOperation();
             }
 
             return wantCaptureMouse;
@@ -2702,7 +2851,20 @@ void StudioGui::DrawPositionMarkers()
         // Create and add 3D text label if we have meaningful information
         if (!pos.name.empty())
         {
-            osg::ref_ptr<osg::Geode> text_geode = CreateTextLabelGeode(pos);
+            osg::ref_ptr<osg::Geode> text_geode;
+            if (heading_operation_active_ && pos.node == heading_position_info_.node)
+            {
+                // Append the heading value being edited, marking whether it is lane-relative or absolute
+                char suffix[64];
+                snprintf(suffix, sizeof(suffix), " (%s h=%.1f deg)", heading_is_relative_ ? "rel" : "abs", heading_preview_h_ * 180.0 / M_PI);
+                PositionInfo labeled_pos = pos;
+                labeled_pos.name += suffix;
+                text_geode = CreateTextLabelGeode(labeled_pos);
+            }
+            else
+            {
+                text_geode = CreateTextLabelGeode(pos);
+            }
             if (text_geode)
             {
                 // Position text slightly offset from the marker
@@ -2755,6 +2917,18 @@ void StudioGui::DrawPositionMarkers()
 
         auto line_geode = CreateLineStripGeode(positions);
         position_markers_group->addChild(line_geode);
+    }
+
+    // Draw an auxiliary line from the entity towards the mouse while its heading is being modified
+    if (heading_operation_active_)
+    {
+        PositionInfo line_start = heading_position_info_;
+        PositionInfo line_end;
+        line_end.x = hud_mouse_world_x_;
+        line_end.y = hud_mouse_world_y_;
+        line_end.z = heading_position_info_.z;
+        std::vector<const PositionInfo*> line_points = {&line_start, &line_end};
+        position_markers_group->addChild(CreateLineStripGeode(line_points));
     }
 }
 
@@ -3536,6 +3710,135 @@ void StudioGui::EndMoveOperation()
 
     move_operation_active_      = false;
     selected_position_for_move_ = nullptr;
+}
+
+void StudioGui::StartHeadingOperation(const PositionInfo& position_info)
+{
+    if (position_info.node.empty() ||
+        (position_info.type != PositionType::LANE_POSITION && position_info.type != PositionType::WORLD_POSITION))
+    {
+        LOG("StartHeadingOperation: only LanePosition and WorldPosition are supported");
+        return;
+    }
+
+    heading_operation_active_ = true;
+    heading_position_info_    = position_info;
+    heading_is_relative_      = false;
+    heading_base_h_           = 0.0;
+    heading_preview_h_        = position_info.h;
+
+    // Snapshot the original orientation state so that cancel can restore it
+    if (position_info.type == PositionType::WORLD_POSITION)
+    {
+        pugi::xml_attribute h_attr        = position_info.node.attribute("h");
+        heading_orig_attr_present_        = !h_attr.empty();
+        heading_orig_h_value_             = h_attr.value();
+        heading_orig_orientation_present_ = false;
+    }
+    else  // LanePosition
+    {
+        pugi::xml_node      orientation   = position_info.node.child("Orientation");
+        pugi::xml_attribute h_attr        = orientation.attribute("h");
+        heading_orig_orientation_present_ = !orientation.empty();
+        heading_orig_attr_present_        = !h_attr.empty();
+        heading_orig_h_value_             = h_attr.value();
+
+        // A LanePosition without Orientation is lane-aligned, i.e. relative with h=0
+        heading_is_relative_ = position_info.orientation_is_relative;
+        if (heading_is_relative_)
+        {
+            // Lane direction at the position, needed to convert the absolute mouse direction
+            // into the lane-relative h value stored in the file
+            heading_base_h_ = GetAngleInInterval2PI(position_info.absolute_h - position_info.h);
+        }
+    }
+
+    data_model_.markers_to_update_ = true;
+}
+
+void StudioGui::UpdateHeadingOperation()
+{
+    if (!heading_operation_active_)
+        return;
+
+    UpdateMousePositionFromWorld();
+
+    double dx = hud_mouse_world_x_ - heading_position_info_.x;
+    double dy = hud_mouse_world_y_ - heading_position_info_.y;
+    if (dx * dx + dy * dy < 0.25)
+        return;  // mouse too close to the entity, direction would be unstable
+
+    // Absolute (world) heading pointing from the entity towards the mouse. For a lane-relative
+    // orientation convert it into a lane-relative value, so the resulting absolute heading still
+    // matches the mouse direction after the lane direction is added back at playback
+    double target_h    = GetAngleInInterval2PI(atan2(dy, dx));
+    double h           = heading_is_relative_ ? GetAngleInInterval2PI(target_h - heading_base_h_) : target_h;
+    heading_preview_h_ = h;
+
+    if (heading_position_info_.type == PositionType::WORLD_POSITION)
+    {
+        pugi::xml_attribute h_attr = heading_position_info_.node.attribute("h");
+        if (h_attr.empty())
+            h_attr = heading_position_info_.node.append_attribute("h");
+        h_attr.set_value(std::to_string(h).c_str());
+    }
+    else
+    {
+        pugi::xml_node orientation = heading_position_info_.node.child("Orientation");
+        if (orientation.empty())
+        {
+            orientation = heading_position_info_.node.append_child("Orientation");
+            orientation.append_attribute("type").set_value("relative");
+        }
+        pugi::xml_attribute h_attr = orientation.attribute("h");
+        if (h_attr.empty())
+            h_attr = orientation.append_attribute("h");
+        h_attr.set_value(std::to_string(h).c_str());
+    }
+
+    // No SetModified() during the preview: the document hash change already triggers re-extraction
+    // and marker redraw, a single undo state is pushed on confirm
+    data_model_.markers_to_update_ = true;
+}
+
+void StudioGui::ConfirmHeadingOperation()
+{
+    if (!heading_operation_active_)
+        return;
+
+    heading_operation_active_ = false;
+    SetModified();  // single undo step for the whole heading change
+    data_model_.markers_to_update_ = true;
+}
+
+void StudioGui::CancelHeadingOperation()
+{
+    if (!heading_operation_active_)
+        return;
+
+    heading_operation_active_ = false;
+
+    // Restore the original orientation state
+    pugi::xml_node node = heading_position_info_.node;
+    if (heading_position_info_.type == PositionType::WORLD_POSITION)
+    {
+        if (heading_orig_attr_present_)
+            node.attribute("h").set_value(heading_orig_h_value_.c_str());
+        else
+            node.remove_attribute(node.attribute("h"));
+    }
+    else
+    {
+        pugi::xml_node orientation = node.child("Orientation");
+        if (!heading_orig_orientation_present_)
+            node.remove_child(orientation);
+        else if (heading_orig_attr_present_)
+            orientation.attribute("h").set_value(heading_orig_h_value_.c_str());
+        else
+            orientation.remove_attribute(orientation.attribute("h"));
+    }
+
+    data_model_.markers_to_update_ = true;
 }
 
 void StudioGui::RenderValidationReport()

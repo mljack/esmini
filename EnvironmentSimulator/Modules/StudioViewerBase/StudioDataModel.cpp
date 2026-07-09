@@ -269,8 +269,10 @@ StudioDataModel::StudioDataModel()
     };
 
     mode_ = StudioMode::COMPOSER;
-    if (!xml_schema_.load_file("OpenSCENARIO.xsd"))
+    if (!xml_schema_.load_file("OpenSCENARIO.xsd")) {
         printf("schema loading failed\n");
+        exit(1);
+    }
 
     Clear();
     if (!g_xosc_path.empty())
@@ -474,6 +476,180 @@ pugi::xml_node StudioDataModel::DuplicateNode(pugi::xml_node node)
     return new_node;
 }
 
+static bool IsRelativePositionNode(const std::string& node_name)
+{
+    return node_name == "RelativeLanePosition" || node_name == "RelativeWorldPosition" || node_name == "RelativeObjectPosition" ||
+           node_name == "RelativeRoadPosition";
+}
+
+// Collect the nodes in the subtree that act on the given entity, i.e. carry entityRef=entity_name
+// (typically Private under Init/Actions, or EntityAction inside a GlobalAction). entityRef on
+// relative position nodes refers to a reference entity, not the acting one, so those are skipped.
+static void CollectActionNodesForEntity(pugi::xml_node node, const std::string& entity_name, std::vector<pugi::xml_node>* out)
+{
+    for (pugi::xml_node child : node.children())
+    {
+        if (IsRelativePositionNode(child.name()))
+            continue;
+
+        if (child.attribute("entityRef").value() == entity_name)
+        {
+            out->push_back(child);
+            continue;  // whole subtree belongs to this entity, no need to descend
+        }
+
+        CollectActionNodesForEntity(child, entity_name, out);
+    }
+}
+
+// Set entityRef attributes matching old_name to new_name within a subtree, skipping relative
+// position nodes (their entityRef points at a reference entity that must stay unchanged)
+static void RetargetEntityRefsInSubtree(pugi::xml_node node, const std::string& old_name, const std::string& new_name)
+{
+    if (IsRelativePositionNode(node.name()))
+        return;
+
+    pugi::xml_attribute attr = node.attribute("entityRef");
+    if (attr && attr.value() == old_name)
+        attr.set_value(new_name.c_str());
+
+    for (pugi::xml_node child : node.children())
+        RetargetEntityRefsInSubtree(child, old_name, new_name);
+}
+
+bool StudioDataModel::DeleteEntity(const std::string& entity_name)
+{
+    if (entity_name.empty())
+        return false;
+
+    bool changed = false;
+
+    // Delete all actions under Storyboard > Init > Actions referring to the entity. When a removal
+    // leaves an ancestor without children, remove the ancestor too, up to but excluding Actions.
+    pugi::xml_node init_actions = RootNode().child("Storyboard").child("Init").child("Actions");
+    if (init_actions)
+    {
+        std::vector<pugi::xml_node> action_nodes;
+        CollectActionNodesForEntity(init_actions, entity_name, &action_nodes);
+        for (pugi::xml_node action_node : action_nodes)
+        {
+            pugi::xml_node parent = action_node.parent();
+            parent.remove_child(action_node);
+            changed = true;
+
+            while (parent != init_actions && !parent.first_child())
+            {
+                pugi::xml_node grandparent = parent.parent();
+                grandparent.remove_child(parent);
+                parent = grandparent;
+            }
+        }
+    }
+
+    // Delete the entity declaration under Entities
+    pugi::xml_node entities = RootNode().child("Entities");
+    for (pugi::xml_node obj = entities.child("ScenarioObject"); obj;)
+    {
+        pugi::xml_node next = obj.next_sibling("ScenarioObject");
+        if (obj.attribute("name").value() == entity_name)
+        {
+            entities.remove_child(obj);
+            changed = true;
+        }
+        obj = next;
+    }
+
+    if (!changed)
+    {
+        LOG(("DeleteEntity: nothing to delete for entity [" + entity_name + "]").c_str());
+        return false;
+    }
+
+    // Clear any remaining references to the deleted entity (e.g. in stories or conditions)
+    UpdateEntityRefs(entity_name, "");
+    SetModified();
+    return true;
+}
+
+std::string StudioDataModel::CloneEntity(const std::string& entity_name)
+{
+    if (entity_name.empty())
+        return "";
+
+    pugi::xml_node entities = RootNode().child("Entities");
+    pugi::xml_node source_object;
+    for (pugi::xml_node obj : entities.children("ScenarioObject"))
+    {
+        if (obj.attribute("name").value() == entity_name)
+        {
+            source_object = obj;
+            break;
+        }
+    }
+
+    if (source_object.empty())
+    {
+        LOG(("CloneEntity: no ScenarioObject named [" + entity_name + "] found under Entities").c_str());
+        return "";
+    }
+
+    // Duplicate the declaration and give the copy a unique name
+    pugi::xml_node new_object = entities.insert_copy_after(source_object, source_object);
+    EnsureUniqueNamesForSubtree(new_object);
+    std::string new_name = new_object.attribute("name").value();
+    if (new_name.empty() || new_name == entity_name)
+    {
+        entities.remove_child(new_object);
+        LOG(("CloneEntity: failed to give the clone of [" + entity_name + "] a unique name").c_str());
+        return "";
+    }
+
+    // Copy all Init actions of the source entity and retarget them to the clone
+    pugi::xml_node init_actions = RootNode().child("Storyboard").child("Init").child("Actions");
+    if (init_actions)
+    {
+        std::vector<pugi::xml_node> action_nodes;
+        CollectActionNodesForEntity(init_actions, entity_name, &action_nodes);
+        for (pugi::xml_node action_node : action_nodes)
+        {
+            pugi::xml_node copy = action_node.parent().insert_copy_after(action_node, action_node);
+            RetargetEntityRefsInSubtree(copy, entity_name, new_name);
+        }
+    }
+
+    SetModified();
+    return new_name;
+}
+
+bool StudioDataModel::RenameEntity(const std::string& old_name, const std::string& new_name)
+{
+    if (old_name.empty() || new_name.empty() || new_name == old_name)
+        return false;
+
+    pugi::xml_node entities = RootNode().child("Entities");
+    pugi::xml_node object;
+    for (pugi::xml_node obj : entities.children("ScenarioObject"))
+    {
+        if (obj.attribute("name").value() == old_name)
+        {
+            object = obj;
+            break;
+        }
+    }
+
+    if (object.empty())
+    {
+        LOG(("RenameEntity: no ScenarioObject named [" + old_name + "] found under Entities").c_str());
+        return false;
+    }
+
+    // Update the declaration and every reference to the entity in the document
+    object.attribute("name").set_value(new_name.c_str());
+    UpdateEntityRefs(old_name, new_name);
+    SetModified();
+    return true;
+}
+
 void StudioDataModel::AddAttribute(pugi::xml_node node, const std::string& attr_name, const std::string& attr_value)
 {
     if (node.empty() || attr_name.empty())
@@ -650,7 +826,9 @@ void StudioDataModel::UpdateEntityRefs(const std::string& old_name, const std::s
 
         for (pugi::xml_attribute attr = node.first_attribute(); attr; attr = attr.next_attribute())
         {
-            if (std::string(attr.name()) == "entityRef" && attr.value() == old_name)
+            std::string attr_name = attr.name();
+            // masterEntityRef (e.g. on SynchronizeAction) references entities as well
+            if ((attr_name == "entityRef" || attr_name == "masterEntityRef") && attr.value() == old_name)
             {
                 if (!new_name.empty())
                 {

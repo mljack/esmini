@@ -91,6 +91,12 @@ private:
     void UpdateMoveOperation();
     void EndMoveOperation();
 
+    // Heading modify operation support ("Modify Heading" in the viewport context menu)
+    void StartHeadingOperation(const PositionInfo& position_info);
+    void UpdateHeadingOperation();
+    void ConfirmHeadingOperation();
+    void CancelHeadingOperation();
+
     // Locked target position update functions (for fixed target during move operations)
     void UpdatePositionFromLockedTarget(PositionInfo* position_info);
 
@@ -130,6 +136,16 @@ private:
     bool          move_context_menu_to_open_  = false;
     bool          move_operation_active_      = false;
     PositionInfo* selected_position_for_move_ = nullptr;  // Position info for move operations
+
+    // Heading modify operation state
+    bool         heading_operation_active_         = false;
+    PositionInfo heading_position_info_;                     // locked target position (snapshot taken at operation start)
+    bool         heading_is_relative_              = false;  // h is stored lane-relative in the file
+    double       heading_base_h_                   = 0.0;    // lane direction at the position (relative case only)
+    double       heading_preview_h_                = 0.0;    // h value currently written to the file (shown in the label)
+    bool         heading_orig_attr_present_        = false;  // original h attribute existed
+    std::string  heading_orig_h_value_;                      // original raw h attribute value
+    bool         heading_orig_orientation_present_ = false;  // LanePosition only: Orientation child existed
 
     // Real-time HUD data
     double hud_mouse_world_x_     = 0.0;
