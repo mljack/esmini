@@ -114,6 +114,11 @@ private:
     void HandleNodeDialog();
     void HandleMovePositionMenu();
     void HandleEsminiSettingsDialog();
+    void HandleViewportContextMenu();
+    void HandleAddVehicleDialog();
+    void OpenAddVehicleDialog();
+
+    std::vector<std::string> GetVehicleCatalogEntryNames() const;
     void RenderMenuBar();
     void RenderTimeline();
     void HandleElementContextMenu();
@@ -136,6 +141,16 @@ private:
     bool          move_context_menu_to_open_  = false;
     bool          move_operation_active_      = false;
     PositionInfo* selected_position_for_move_ = nullptr;  // Position info for move operations
+
+    // Viewport "Add Vehicle" context menu and modal dialog state
+    bool                     add_vehicle_context_menu_to_open_ = false;
+    bool                     add_vehicle_dialog_to_open_       = false;
+    bool                     add_vehicle_dialog_active_        = false;
+    std::string              add_vehicle_name_;
+    std::string              add_vehicle_entry_name_;
+    std::string              add_vehicle_catalog_name_;
+    std::vector<std::string> add_vehicle_entry_options_;
+    float                    add_vehicle_init_speed_ = 0.0f;
 
     // Heading modify operation state
     bool         heading_operation_active_         = false;

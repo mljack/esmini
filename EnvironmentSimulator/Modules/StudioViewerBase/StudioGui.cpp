@@ -708,6 +708,8 @@ void StudioGui::RenderXmlTree()
         HandleAttrDialog();
         HandleNodeDialog();
         HandleMovePositionMenu();
+        HandleViewportContextMenu();
+        HandleAddVehicleDialog();
     }
     ImGui::End();
 }
@@ -1160,6 +1162,234 @@ void StudioGui::HandleMovePositionMenu()
             rename_dialog_active = false;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndPopup();
+    }
+}
+
+std::vector<std::string> StudioGui::GetVehicleCatalogEntryNames() const
+{
+    std::vector<std::string> names;
+
+    pugi::xml_node catalog_locations = data_model_.RootNode().child("CatalogLocations");
+    if (!catalog_locations)
+        return names;
+
+    // Resolve the VehicleCatalog directory path
+    std::string    catalog_dir;
+    pugi::xml_node vehicle_catalog = catalog_locations.child("VehicleCatalog");
+    if (vehicle_catalog)
+    {
+        pugi::xml_node dir_node = vehicle_catalog.child("Directory");
+        if (dir_node)
+            catalog_dir = dir_node.attribute("path").as_string("");
+    }
+
+    if (catalog_dir.empty())
+        return names;
+
+    // Build candidate paths for the VehicleCatalog.xosc file, mirroring GetModelIdFromCatalogEntry
+    std::vector<std::string> candidate_paths;
+    std::string              scenario_dir = DirNameOf(data_model_.xosc_path_);
+    if (!scenario_dir.empty())
+        candidate_paths.push_back(scenario_dir + "/" + catalog_dir + "/VehicleCatalog.xosc");
+    candidate_paths.push_back(catalog_dir + "/VehicleCatalog.xosc");
+    for (const auto& env_path : SE_Env::Inst().GetPaths())
+        candidate_paths.push_back(env_path + "/" + catalog_dir + "/VehicleCatalog.xosc");
+
+    // Load the first VehicleCatalog.xosc that exists and parses successfully
+    pugi::xml_document catalog_doc;
+    bool               loaded = false;
+    for (const auto& path : candidate_paths)
+    {
+        if (FileExists(path.c_str()) && catalog_doc.load_file(path.c_str()))
+        {
+            loaded = true;
+            break;
+        }
+    }
+
+    if (!loaded)
+        return names;
+
+    // Collect the name attribute of every Vehicle under OpenSCENARIO > Catalog
+    pugi::xml_node catalog_root = catalog_doc.child("OpenSCENARIO");
+    if (!catalog_root)
+        return names;
+
+    for (pugi::xml_node catalog : catalog_root.children("Catalog"))
+    {
+        for (pugi::xml_node vehicle : catalog.children("Vehicle"))
+        {
+            std::string vehicle_name = vehicle.attribute("name").as_string("");
+            if (!vehicle_name.empty())
+                names.push_back(vehicle_name);
+        }
+    }
+
+    return names;
+}
+
+void StudioGui::OpenAddVehicleDialog()
+{
+    // Determine the ego entity's catalog reference, used as the fallback entry name
+    std::string    ego_catalog_name = "VehicleCatalog";
+    std::string    ego_entry_name;
+    pugi::xml_node entities = data_model_.RootNode().child("Entities");
+    for (pugi::xml_node obj : entities.children("ScenarioObject"))
+    {
+        std::string obj_name = obj.attribute("name").as_string("");
+        if (obj_name == "ego" || obj_name == "Ego" || obj_name == "EGO")
+        {
+            pugi::xml_node catalog_ref = obj.child("CatalogReference");
+            if (catalog_ref)
+            {
+                ego_catalog_name = catalog_ref.attribute("catalogName").as_string(ego_catalog_name.c_str());
+                ego_entry_name   = catalog_ref.attribute("entryName").as_string("");
+            }
+            break;
+        }
+    }
+
+    add_vehicle_catalog_name_ = ego_catalog_name;
+
+    // Populate the entry-name dropdown from VehicleCatalog.xosc, falling back to the ego entry name
+    add_vehicle_entry_options_ = GetVehicleCatalogEntryNames();
+    if (add_vehicle_entry_options_.empty() && !ego_entry_name.empty())
+        add_vehicle_entry_options_.push_back(ego_entry_name);
+
+    // Default the selection to the ego entry when available, otherwise the first option
+    if (!add_vehicle_entry_options_.empty())
+    {
+        auto it = std::find(add_vehicle_entry_options_.begin(), add_vehicle_entry_options_.end(), ego_entry_name);
+        add_vehicle_entry_name_ = (it != add_vehicle_entry_options_.end()) ? *it : add_vehicle_entry_options_.front();
+    }
+    else
+    {
+        add_vehicle_entry_name_ = ego_entry_name;
+    }
+
+    // Suggest a unique default name and reset the init speed
+    add_vehicle_name_       = data_model_.EnsureUniqueName("v_1", pugi::xml_node());
+    add_vehicle_init_speed_ = 0.0f;
+
+    add_vehicle_dialog_to_open_ = true;
+}
+
+void StudioGui::HandleViewportContextMenu()
+{
+    if (add_vehicle_context_menu_to_open_)
+    {
+        add_vehicle_context_menu_to_open_ = false;
+        ImGui::OpenPopup("Viewport Context Menu");
+    }
+
+    if (ImGui::BeginPopup("Viewport Context Menu"))
+    {
+        if (ImGui::MenuItem("Add Vehicle"))
+        {
+            OpenAddVehicleDialog();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void StudioGui::HandleAddVehicleDialog()
+{
+    if (add_vehicle_dialog_to_open_)
+    {
+        add_vehicle_dialog_to_open_ = false;
+        add_vehicle_dialog_active_  = true;
+        ImGui::OpenPopup("Add Vehicle");
+    }
+
+    ImGuiIO& io     = ImGui::GetIO();
+    ImVec2   center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Add Vehicle", &add_vehicle_dialog_active_, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Vehicle type (entryName) dropdown
+        ImGui::TextUnformatted("Vehicle Type (entryName)");
+        if (ImGui::BeginCombo("##add_vehicle_entry", add_vehicle_entry_name_.c_str()))
+        {
+            for (const auto& entry : add_vehicle_entry_options_)
+            {
+                bool is_selected = (entry == add_vehicle_entry_name_);
+                if (ImGui::Selectable(entry.c_str(), is_selected))
+                    add_vehicle_entry_name_ = entry;
+                if (is_selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        // Entity name input
+        ImGui::TextUnformatted("Name");
+        add_vehicle_name_.resize(256);
+        ImGui::InputText("##add_vehicle_name", add_vehicle_name_.data(), add_vehicle_name_.size());
+        std::string entered_name = add_vehicle_name_.c_str();
+
+        // Init speed input
+        ImGui::TextUnformatted("Init Speed (m/s)");
+        ImGui::InputFloat("##add_vehicle_speed", &add_vehicle_init_speed_, 0.0f, 0.0f, "%.2f");
+
+        // Validate the entity name (must be non-empty and not clash with an existing ScenarioObject)
+        bool                     name_empty     = entered_name.empty();
+        std::vector<std::string> existing_names = data_model_.GetScenarioObjectNames();
+        bool is_duplicate = std::find(existing_names.begin(), existing_names.end(), entered_name) != existing_names.end();
+        bool can_confirm  = !name_empty && !is_duplicate && !add_vehicle_entry_name_.empty();
+
+        if (name_empty)
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Name cannot be empty.");
+        else if (is_duplicate)
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "An entity named '%s' already exists.", entered_name.c_str());
+
+        if (!can_confirm)
+            ImGui::BeginDisabled(true);
+        bool confirmed = ImGui::Button("Confirm", ImVec2(120, 0));
+        if (!can_confirm)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        bool cancelled = ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressedMap(ImGuiKey_Escape);
+        // Pressing Enter confirms the dialog, but only while the Confirm button is enabled
+        if (can_confirm && ImGui::IsKeyPressedMap(ImGuiKey_Enter))
+            confirmed = true;
+
+        if (confirmed && can_confirm)
+        {
+            std::string new_name =
+                data_model_.AddVehicle(entered_name, add_vehicle_catalog_name_, add_vehicle_entry_name_, static_cast<double>(add_vehicle_init_speed_));
+            if (!new_name.empty())
+            {
+                scenario_object_map_dirty_ = true;
+                ClearXmlHighlights();
+                ExtractPositionsFromXml();
+
+                // Select the new entity's init position and enter the viewport drag state to place it
+                auto iter = std::find_if(extracted_positions_.begin(),
+                                         extracted_positions_.end(),
+                                         [&](const PositionInfo& info) { return info.name == new_name; });
+                if (iter != extracted_positions_.end())
+                {
+                    for (auto& info : extracted_positions_)
+                        info.selected = false;
+                    iter->selected             = true;
+                    last_picked_position_info_ = *iter;
+                    HighlightXmlNodeForPosition(*iter);
+                    StartMoveOperation(&last_picked_position_info_);
+                }
+                data_model_.markers_to_update_ = true;
+            }
+            add_vehicle_dialog_active_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        else if (cancelled)
+        {
+            add_vehicle_dialog_active_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+
         ImGui::EndPopup();
     }
 }
@@ -1732,6 +1962,8 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                             auto* pos_info = PickPosition();
                             if (pos_info)
                                 move_context_menu_to_open_ = true;
+                            else
+                                add_vehicle_context_menu_to_open_ = true;
                         }
                     }
                 }

@@ -621,6 +621,74 @@ std::string StudioDataModel::CloneEntity(const std::string& entity_name)
     return new_name;
 }
 
+std::string StudioDataModel::AddVehicle(const std::string& name,
+                                        const std::string& catalog_name,
+                                        const std::string& entry_name,
+                                        double             init_speed)
+{
+    if (name.empty())
+    {
+        LOG("AddVehicle: empty name provided");
+        return "";
+    }
+
+    pugi::xml_node root     = RootNode();
+    pugi::xml_node entities = root.child("Entities");
+    if (!entities)
+    {
+        LOG("AddVehicle: Entities node not found");
+        return "";
+    }
+
+    // Make sure the entity name is unique across the whole document
+    std::string unique_name = EnsureUniqueName(name, pugi::xml_node());
+
+    // Create the ScenarioObject declaration under Entities
+    pugi::xml_node object                    = entities.append_child("ScenarioObject");
+    object.append_attribute("name")          = unique_name.c_str();
+    pugi::xml_node catalog_ref               = object.append_child("CatalogReference");
+    catalog_ref.append_attribute("catalogName") = catalog_name.c_str();
+    catalog_ref.append_attribute("entryName")   = entry_name.c_str();
+
+    // Create the Init actions (TeleportAction + SpeedAction with AbsoluteTargetSpeed)
+    pugi::xml_node init_actions = root.child("Storyboard").child("Init").child("Actions");
+    if (init_actions)
+    {
+        pugi::xml_node priv           = init_actions.append_child("Private");
+        priv.append_attribute("entityRef") = unique_name.c_str();
+
+        // TeleportAction with a default LanePosition (the actual position is set by the drag operation)
+        pugi::xml_node teleport_action = priv.append_child("PrivateAction").append_child("TeleportAction");
+        pugi::xml_node lane_position   = teleport_action.append_child("Position").append_child("LanePosition");
+        lane_position.append_attribute("laneId") = "-1";
+        lane_position.append_attribute("roadId") = "0";
+        lane_position.append_attribute("s")      = "0";
+        lane_position.append_attribute("offset") = "0";
+        pugi::xml_node orientation               = lane_position.append_child("Orientation");
+        orientation.append_attribute("type")     = "relative";
+        orientation.append_attribute("h")        = "0";
+
+        // SpeedAction with the requested initial speed
+        pugi::xml_node speed_action    = priv.append_child("PrivateAction").append_child("LongitudinalAction").append_child("SpeedAction");
+        pugi::xml_node dynamics        = speed_action.append_child("SpeedActionDynamics");
+        dynamics.append_attribute("dynamicsDimension") = "time";
+        dynamics.append_attribute("dynamicsShape")     = "step";
+        dynamics.append_attribute("value")             = "0";
+
+        std::ostringstream speed_stream;
+        speed_stream << init_speed;
+        pugi::xml_node abs_target = speed_action.append_child("SpeedActionTarget").append_child("AbsoluteTargetSpeed");
+        abs_target.append_attribute("value") = speed_stream.str().c_str();
+    }
+    else
+    {
+        LOG("AddVehicle: Storyboard/Init/Actions node not found, only the entity declaration was created");
+    }
+
+    SetModified();
+    return unique_name;
+}
+
 bool StudioDataModel::RenameEntity(const std::string& old_name, const std::string& new_name)
 {
     if (old_name.empty() || new_name.empty() || new_name == old_name)
