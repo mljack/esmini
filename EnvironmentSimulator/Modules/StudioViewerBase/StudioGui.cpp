@@ -799,11 +799,14 @@ void StudioGui::HandleAttrDialog()
             value_handled = true;
         }
 
-        if (!value_handled && type == "UnsignedInt")
+        if (!value_handled && (type == "UnsignedInt" || type == "UnsignedShort"))
         {
+            // step/step_fast set to 0 hides the +/- buttons and gives a plain keyboard-editable field
             int v = new_attr_value.empty() ? 0 : atoi(new_attr_value.c_str());
-            if (ImGui::DragInt(attr_to_create_name.c_str(), &v, 0.05, 0, 20))
+            if (ImGui::InputInt(attr_to_create_name.c_str(), &v, 0, 0))
             {
+                if (v < 0)
+                    v = 0;
                 new_attr_value = std::to_string(v);
             }
             value_handled = true;
@@ -811,16 +814,16 @@ void StudioGui::HandleAttrDialog()
         if (!value_handled && type == "Int")
         {
             int v = new_attr_value.empty() ? 0 : atoi(new_attr_value.c_str());
-            if (ImGui::DragInt(attr_to_create_name.c_str(), &v, 0.05, -6, 6))
+            if (ImGui::InputInt(attr_to_create_name.c_str(), &v, 0, 0))
             {
                 new_attr_value = std::to_string(v);
             }
             value_handled = true;
         }
-        if (!value_handled && type == "Double")
+        if (!value_handled && (type == "Double" || type == "Float"))
         {
             double v = new_attr_value.empty() ? 0.0 : atof(new_attr_value.c_str());
-            if (ImGui::InputDouble(attr_to_create_name.c_str(), &v, 0.1, 0.0, "%g", ImGuiInputTextFlags_CharsDecimal))
+            if (ImGui::InputDouble(attr_to_create_name.c_str(), &v, 0.0, 0.0, "%g", ImGuiInputTextFlags_CharsScientific))
             {
                 new_attr_value = std::to_string(v);
             }
@@ -2306,11 +2309,14 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
                     SetModified();
                 }
             }
-            else if (type == "UnsignedInt")
+            else if (type == "UnsignedInt" || type == "UnsignedShort")
             {
+                // step/step_fast set to 0 hides the +/- buttons and gives a plain keyboard-editable field
                 int v = attr.as_int();
-                if (ImGui::DragInt(attr.name(), &v, 0.05, 0, 20))
+                if (ImGui::InputInt(attr.name(), &v, 0, 0))
                 {
+                    if (v < 0)
+                        v = 0;
                     attr.set_value(v);
                     SetModified();
                 }
@@ -2318,16 +2324,16 @@ void StudioGui::RenderXmlSubTree(pugi::xml_node node,
             else if (type == "Int")
             {
                 int v = attr.as_int();
-                if (ImGui::DragInt(attr.name(), &v, 0.05, -6, 6))
+                if (ImGui::InputInt(attr.name(), &v, 0, 0))
                 {
                     attr.set_value(v);
                     SetModified();
                 }
             }
-            else if (type == "Double")
+            else if (type == "Double" || type == "Float")
             {
                 double v = attr.as_double();
-                if (ImGui::InputDouble(attr.name(), &v, 0.1, 0.0, "%g", ImGuiInputTextFlags_CharsDecimal))
+                if (ImGui::InputDouble(attr.name(), &v, 0.0, 0.0, "%g", ImGuiInputTextFlags_CharsScientific))
                 {
                     attr.set_value(v);
                     SetModified();
