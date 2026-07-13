@@ -1680,6 +1680,7 @@ void StudioGui::TryLoadOpenDriveFromScenario()
                 positions_extracted_ = false;
                 to_reset_camera_pos_ = true;
                 data_model_.ClearUndoRedoStacks();
+                SE_Env::Inst().AddPath(DirNameOf(result[0]));
             }
             else
             {
