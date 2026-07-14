@@ -1962,21 +1962,45 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                         }
                         else if (!move_operation_active_)
                         {
-                            // Right mouse button - new functionality for move context menu
-                            auto* pos_info = PickPosition();
-                            if (pos_info)
-                                move_context_menu_to_open_ = true;
-                            else
-                                add_vehicle_context_menu_to_open_ = true;
+                            // Defer opening the context menu until release, so a right-drag (camera pan)
+                            // does not trigger it. The menu opens on release only if the mouse did not move.
+                            right_click_candidate_ = true;
+                            right_press_x_         = ea.getX();
+                            right_press_y_         = ea.getY();
                         }
                     }
                 }
+            }
+
+            // Open the right-click context menu on release, but only for a genuine click (not a pan)
+            if (!wantCaptureMouse && ea.getEventType() == osgGA::GUIEventAdapter::RELEASE &&
+                ea.getButton() == osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
+            {
+                if (right_click_candidate_ && data_model_.mode_ == StudioMode::COMPOSER && !heading_operation_active_ && !move_operation_active_)
+                {
+                    auto* pos_info = PickPosition();
+                    if (pos_info)
+                        move_context_menu_to_open_ = true;
+                    else
+                        add_vehicle_context_menu_to_open_ = true;
+                }
+                right_click_candidate_ = false;
             }
         }
         case osgGA::GUIEventAdapter::DRAG:
         case osgGA::GUIEventAdapter::MOVE:
         {
             io.MousePos = ImVec2(ea.getX(), io.DisplaySize.y - ea.getY());
+
+            // A right-button drag beyond a small threshold is a camera pan, not a click: cancel the pending menu
+            if (right_click_candidate_)
+            {
+                const float click_move_threshold = 4.0f;  // pixels
+                float       dx                    = ea.getX() - right_press_x_;
+                float       dy                    = ea.getY() - right_press_y_;
+                if (dx * dx + dy * dy > click_move_threshold * click_move_threshold)
+                    right_click_candidate_ = false;
+            }
 
             // Update move operation during drag if active
             if (move_operation_active_)

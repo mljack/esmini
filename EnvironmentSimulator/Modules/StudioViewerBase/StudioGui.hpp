@@ -142,6 +142,11 @@ private:
     bool          move_operation_active_      = false;
     PositionInfo* selected_position_for_move_ = nullptr;  // Position info for move operations
 
+    // Right-click detection: distinguish a right-click (opens a context menu) from a right-drag (camera pan)
+    bool  right_click_candidate_ = false;
+    float right_press_x_         = 0.0f;
+    float right_press_y_         = 0.0f;
+
     // Viewport "Add Vehicle" context menu and modal dialog state
     bool                     add_vehicle_context_menu_to_open_ = false;
     bool                     add_vehicle_dialog_to_open_       = false;
