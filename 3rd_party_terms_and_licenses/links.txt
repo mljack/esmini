@@ -23,6 +23,9 @@ https://github.com/protocolbuffers/protobuf
 pugixml
 https://pugixml.org/
 
+nlohmann/json
+https://github.com/nlohmann/json
+
 SUMO
 https://www.eclipse.org/sumo/
 https://github.com/eclipse/sumo

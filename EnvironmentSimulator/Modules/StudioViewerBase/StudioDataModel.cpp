@@ -21,6 +21,10 @@
 #include <map>
 #include <sstream>
 #include <cctype>
+#include <cmath>
+#include <fstream>
+#include <limits>
+#include <nlohmann/json.hpp>
 
 #ifdef __linux__
 #include <unistd.h>
@@ -2160,4 +2164,622 @@ std::string StudioDataModel::FindEntityNameFromNode(pugi::xml_node node)
     }
 
     return "";  // No vehicle name found
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Trajectory editing data model (see Trajectory_Editing.md)
+// ---------------------------------------------------------------------------------------------------------------
+
+void EntityPose::SyncFromWorld(bool align_to_lane)
+{
+    ConvertWorldPosToLanePos(x, y, z, h, align_to_lane, &road_id, &lane_id, &s, &lane_offset, &relative_h);
+    source = SourceRepr::WORLD;
+}
+
+void EntityPose::SyncFromLane()
+{
+    ConvertLanePosToWorldPos(road_id, lane_id, s, lane_offset, relative_h, &x, &y, &z, &h);
+    source = SourceRepr::LANE;
+}
+
+namespace
+{
+double NormalizeAngle(double angle)
+{
+    while (angle > M_PI)
+        angle -= 2.0 * M_PI;
+    while (angle < -M_PI)
+        angle += 2.0 * M_PI;
+    return angle;
+}
+
+double LerpAngle(double a, double b, double t)
+{
+    return a + NormalizeAngle(b - a) * t;
+}
+
+EntityPose LerpPose(const EntityPose& a, const EntityPose& b, double t)
+{
+    EntityPose p;
+    p.x      = a.x + (b.x - a.x) * t;
+    p.y      = a.y + (b.y - a.y) * t;
+    p.z      = a.z + (b.z - a.z) * t;
+    p.h      = LerpAngle(a.h, b.h, t);
+    p.source = EntityPose::SourceRepr::WORLD;
+    return p;
+}
+
+double CatmullRomComponent(double v0, double v1, double v2, double v3, double t)
+{
+    double t2 = t * t;
+    double t3 = t2 * t;
+    return 0.5 * ((2.0 * v1) + (-v0 + v2) * t + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * t2 + (-v0 + 3.0 * v1 - 3.0 * v2 + v3) * t3);
+}
+
+// Catmull-Rom interpolation between p1 and p2 (t in [0, 1]), using p0/p3 as the neighboring control points.
+EntityPose CatmullRomPose(const EntityPose& p0, const EntityPose& p1, const EntityPose& p2, const EntityPose& p3, double t)
+{
+    EntityPose p;
+    p.x      = CatmullRomComponent(p0.x, p1.x, p2.x, p3.x, t);
+    p.y      = CatmullRomComponent(p0.y, p1.y, p2.y, p3.y, t);
+    p.z      = CatmullRomComponent(p0.z, p1.z, p2.z, p3.z, t);
+    p.h      = LerpAngle(p1.h, p2.h, t);
+    p.source = EntityPose::SourceRepr::WORLD;
+    return p;
+}
+
+double Distance3D(const EntityPose& a, const EntityPose& b)
+{
+    double dx = b.x - a.x;
+    double dy = b.y - a.y;
+    double dz = b.z - a.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Interpolate along a fine-grained polyline (fine_poses / cumulative_s, as produced by EntityPath::BuildFineSamples)
+// at arc length s. Shared by EntityPath::Evaluate() and EntityPath::RebuildDenseSamples() so the underlying curve
+// only needs to be sampled once.
+EntityPose SampleAlongFinePoses(const std::vector<EntityPose>& fine_poses, const std::vector<double>& cumulative_s, double s)
+{
+    if (fine_poses.empty())
+        return EntityPose();
+    if (fine_poses.size() == 1)
+        return fine_poses.front();
+
+    double total = cumulative_s.back();
+    s            = std::max(0.0, std::min(s, total));
+
+    size_t idx = 0;
+    while (idx + 1 < cumulative_s.size() && cumulative_s[idx + 1] < s)
+        idx++;
+
+    if (idx + 1 >= cumulative_s.size())
+        return fine_poses.back();
+
+    double seg_len = cumulative_s[idx + 1] - cumulative_s[idx];
+    double t       = (seg_len > 1e-9) ? (s - cumulative_s[idx]) / seg_len : 0.0;
+    return LerpPose(fine_poses[idx], fine_poses[idx + 1], t);
+}
+}  // namespace
+
+void EntityPath::BuildFineSamples(std::vector<EntityPose>* out_poses, std::vector<double>* out_cumulative_s) const
+{
+    out_poses->clear();
+    out_cumulative_s->clear();
+
+    if (points_.empty())
+        return;
+
+    if (points_.size() == 1)
+    {
+        out_poses->push_back(points_.front());
+        out_cumulative_s->push_back(0.0);
+        return;
+    }
+
+    // Number of intermediate steps generated per segment. A straight line only needs the two endpoints; curved
+    // modes are approximated by a fine polyline. True clothoid fitting is not implemented yet, so CLOTHOID
+    // currently falls back to the same Catmull-Rom approximation as "Spline" (see Trajectory_Editing.md 9.1/9.4
+    // for the plan to reuse RoadManager's clothoid infrastructure instead, in a later iteration).
+    const int steps_per_segment = (interp_mode_ == InterpMode::LINEAR) ? 1 : 16;
+
+    out_poses->push_back(points_.front());
+    out_cumulative_s->push_back(0.0);
+
+    for (size_t i = 0; i + 1 < points_.size(); i++)
+    {
+        const EntityPose& p1 = points_[i];
+        const EntityPose& p2 = points_[i + 1];
+
+        for (int step = 1; step <= steps_per_segment; step++)
+        {
+            double t = static_cast<double>(step) / static_cast<double>(steps_per_segment);
+
+            EntityPose sample;
+            if (interp_mode_ == InterpMode::LINEAR)
+            {
+                sample = LerpPose(p1, p2, t);
+            }
+            else
+            {
+                const EntityPose& p0 = (i == 0) ? p1 : points_[i - 1];
+                const EntityPose& p3 = (i + 2 < points_.size()) ? points_[i + 2] : p2;
+                sample                = CatmullRomPose(p0, p1, p2, p3, t);
+            }
+
+            double d = Distance3D(out_poses->back(), sample);
+            out_poses->push_back(sample);
+            out_cumulative_s->push_back(out_cumulative_s->back() + d);
+        }
+    }
+}
+
+double EntityPath::GetTotalLength() const
+{
+    std::vector<EntityPose> fine_poses;
+    std::vector<double>     cumulative_s;
+    BuildFineSamples(&fine_poses, &cumulative_s);
+    return cumulative_s.empty() ? 0.0 : cumulative_s.back();
+}
+
+EntityPose EntityPath::Evaluate(double s) const
+{
+    std::vector<EntityPose> fine_poses;
+    std::vector<double>     cumulative_s;
+    BuildFineSamples(&fine_poses, &cumulative_s);
+    return SampleAlongFinePoses(fine_poses, cumulative_s, s);
+}
+
+int EntityPath::FindNearestPointIndex(double x, double y) const
+{
+    if (points_.empty())
+        return -1;
+
+    int    best_index    = 0;
+    double best_dist_sqr = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < points_.size(); i++)
+    {
+        double dx       = points_[i].x - x;
+        double dy       = points_[i].y - y;
+        double dist_sqr = dx * dx + dy * dy;
+        if (dist_sqr < best_dist_sqr)
+        {
+            best_dist_sqr = dist_sqr;
+            best_index    = static_cast<int>(i);
+        }
+    }
+    return best_index;
+}
+
+int EntityPath::InsertPoint(double s, const EntityPose& pose)
+{
+    // Order the new point using the cumulative polyline distance between the existing control points - a
+    // light-weight approximation that avoids evaluating the full interpolated curve just to insert a point.
+    double cumulative = 0.0;
+    size_t insert_at  = points_.size();
+    for (size_t i = 0; i < points_.size(); i++)
+    {
+        if (i > 0)
+            cumulative += Distance3D(points_[i - 1], points_[i]);
+        if (cumulative >= s)
+        {
+            insert_at = i;
+            break;
+        }
+    }
+
+    points_.insert(points_.begin() + static_cast<long>(insert_at), pose);
+    return static_cast<int>(insert_at);
+}
+
+void EntityPath::RemovePoint(int index)
+{
+    if (index < 0 || static_cast<size_t>(index) >= points_.size())
+        return;
+    points_.erase(points_.begin() + index);
+}
+
+void EntityPath::RebuildDenseSamples(double ds)
+{
+    dense_samples_.clear();
+
+    std::vector<EntityPose> fine_poses;
+    std::vector<double>     cumulative_s;
+    BuildFineSamples(&fine_poses, &cumulative_s);
+
+    if (fine_poses.empty())
+        return;
+    if (fine_poses.size() == 1 || ds <= 1e-6)
+    {
+        dense_samples_ = fine_poses;
+        return;
+    }
+
+    double total = cumulative_s.back();
+    for (double s = 0.0; s < total; s += ds)
+        dense_samples_.push_back(SampleAlongFinePoses(fine_poses, cumulative_s, s));
+    dense_samples_.push_back(fine_poses.back());
+}
+
+namespace
+{
+double EvaluateLinearSpeed(const std::vector<SpeedProfilePoint>& points, double s)
+{
+    if (points.empty())
+        return 0.0;
+    if (points.size() == 1 || s <= points.front().s)
+        return points.front().speed;
+    if (s >= points.back().s)
+        return points.back().speed;
+
+    for (size_t i = 0; i + 1 < points.size(); i++)
+    {
+        if (s >= points[i].s && s <= points[i + 1].s)
+        {
+            double seg_len = points[i + 1].s - points[i].s;
+            double t       = (seg_len > 1e-9) ? (s - points[i].s) / seg_len : 0.0;
+            return points[i].speed + (points[i + 1].speed - points[i].speed) * t;
+        }
+    }
+    return points.back().speed;
+}
+
+// Fritsch-Carlson monotonic cubic Hermite interpolation: avoids the overshoot a plain cubic spline would
+// introduce between speed points, which matters since an interpolated speed must never exceed the two knots
+// it lies between.
+double EvaluateMonotonicCubicSpeed(const std::vector<SpeedProfilePoint>& points, double s)
+{
+    size_t n = points.size();
+    if (n == 0)
+        return 0.0;
+    if (n == 1 || s <= points.front().s)
+        return points.front().speed;
+    if (s >= points.back().s)
+        return points.back().speed;
+
+    std::vector<double> d(n - 1);
+    for (size_t i = 0; i + 1 < n; i++)
+    {
+        double dx = points[i + 1].s - points[i].s;
+        d[i]      = (dx > 1e-9) ? (points[i + 1].speed - points[i].speed) / dx : 0.0;
+    }
+
+    std::vector<double> m(n);
+    m[0]     = d[0];
+    m[n - 1] = d[n - 2];
+    for (size_t i = 1; i + 1 < n; i++)
+        m[i] = (d[i - 1] * d[i] <= 0.0) ? 0.0 : (d[i - 1] + d[i]) * 0.5;
+
+    for (size_t i = 0; i + 1 < n; i++)
+    {
+        if (std::abs(d[i]) < 1e-9)
+        {
+            m[i]     = 0.0;
+            m[i + 1] = 0.0;
+            continue;
+        }
+        double alpha = m[i] / d[i];
+        double beta  = m[i + 1] / d[i];
+        double sum2  = alpha * alpha + beta * beta;
+        if (sum2 > 9.0)
+        {
+            double tau = 3.0 / std::sqrt(sum2);
+            m[i]       = tau * alpha * d[i];
+            m[i + 1]   = tau * beta * d[i];
+        }
+    }
+
+    for (size_t i = 0; i + 1 < n; i++)
+    {
+        if (s >= points[i].s && s <= points[i + 1].s)
+        {
+            double h  = points[i + 1].s - points[i].s;
+            double t  = (h > 1e-9) ? (s - points[i].s) / h : 0.0;
+            double t2 = t * t;
+            double t3 = t2 * t;
+
+            double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            double h10 = t3 - 2.0 * t2 + t;
+            double h01 = -2.0 * t3 + 3.0 * t2;
+            double h11 = t3 - t2;
+
+            return h00 * points[i].speed + h10 * h * m[i] + h01 * points[i + 1].speed + h11 * h * m[i + 1];
+        }
+    }
+    return points.back().speed;
+}
+}  // namespace
+
+double EntitySpeedProfile::EvaluateSpeed(double s) const
+{
+    if (interp_mode_ == InterpMode::MONOTONIC_CUBIC)
+        return EvaluateMonotonicCubicSpeed(points_, s);
+    return EvaluateLinearSpeed(points_, s);
+}
+
+int EntitySpeedProfile::InsertPoint(double s, double speed)
+{
+    size_t insert_at = points_.size();
+    for (size_t i = 0; i < points_.size(); i++)
+    {
+        if (points_[i].s >= s)
+        {
+            insert_at = i;
+            break;
+        }
+    }
+
+    SpeedProfilePoint point;
+    point.s     = s;
+    point.speed = speed;
+    points_.insert(points_.begin() + static_cast<long>(insert_at), point);
+    return static_cast<int>(insert_at);
+}
+
+void EntitySpeedProfile::RemovePoint(int index)
+{
+    if (index < 0 || static_cast<size_t>(index) >= points_.size())
+        return;
+    points_.erase(points_.begin() + index);
+}
+
+double EntitySpeedProfile::EvaluateTimeAtS(double s) const
+{
+    if (points_.empty())
+        return 0.0;
+
+    double total_s = std::max(0.0, std::min(s, points_.back().s));
+
+    // Numerically integrate 1 / v(s') from 0 to total_s over a fine grid, clamping v to a small epsilon so
+    // stationary sections of the profile do not make the integral diverge.
+    const double MIN_SPEED = 0.1;  // m/s
+    const int    STEPS     = 200;
+    double       step      = total_s / STEPS;
+    if (step <= 1e-9)
+        return 0.0;
+
+    double time       = 0.0;
+    double prev_inv_v = 1.0 / std::max(EvaluateSpeed(0.0), MIN_SPEED);
+    for (int i = 1; i <= STEPS; i++)
+    {
+        double s_i   = step * i;
+        double inv_v = 1.0 / std::max(EvaluateSpeed(s_i), MIN_SPEED);
+        time += 0.5 * (prev_inv_v + inv_v) * step;
+        prev_inv_v = inv_v;
+    }
+    return time;
+}
+
+double EntitySpeedProfile::EvaluateSAtTime(double t) const
+{
+    if (points_.empty() || t <= 0.0)
+        return 0.0;
+
+    double total_s = points_.back().s;
+    if (total_s <= 1e-9)
+        return 0.0;
+
+    double total_time = EvaluateTimeAtS(total_s);
+    if (t >= total_time)
+        return total_s;
+
+    // Binary search on EvaluateTimeAtS(), which is monotonically increasing in s.
+    double lo = 0.0, hi = total_s;
+    for (int iter = 0; iter < 30; iter++)
+    {
+        double mid      = 0.5 * (lo + hi);
+        double time_mid = EvaluateTimeAtS(mid);
+        if (time_mid < t)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+std::string DeriveTrajJsonPath(const std::string& xosc_path)
+{
+    if (xosc_path.empty())
+        return "";
+
+    std::string base       = xosc_path;
+    size_t      last_dot   = base.find_last_of('.');
+    size_t      last_slash = base.find_last_of("/\\");
+    if (last_dot != std::string::npos && (last_slash == std::string::npos || last_dot > last_slash))
+        base = base.substr(0, last_dot);
+
+    return base + ".traj.json";
+}
+
+namespace
+{
+std::string PathInterpModeToString(EntityPath::InterpMode mode)
+{
+    switch (mode)
+    {
+        case EntityPath::InterpMode::LINEAR:
+            return "linear";
+        case EntityPath::InterpMode::CLOTHOID:
+            return "clothoid";
+        case EntityPath::InterpMode::CATMULL_ROM:
+        default:
+            return "spline";
+    }
+}
+
+EntityPath::InterpMode StringToPathInterpMode(const std::string& mode)
+{
+    if (mode == "linear")
+        return EntityPath::InterpMode::LINEAR;
+    if (mode == "clothoid")
+        return EntityPath::InterpMode::CLOTHOID;
+    return EntityPath::InterpMode::CATMULL_ROM;
+}
+
+std::string SpeedInterpModeToString(EntitySpeedProfile::InterpMode mode)
+{
+    return mode == EntitySpeedProfile::InterpMode::MONOTONIC_CUBIC ? "monotonic_cubic" : "linear";
+}
+
+EntitySpeedProfile::InterpMode StringToSpeedInterpMode(const std::string& mode)
+{
+    return mode == "monotonic_cubic" ? EntitySpeedProfile::InterpMode::MONOTONIC_CUBIC : EntitySpeedProfile::InterpMode::LINEAR;
+}
+
+// Round to a fixed number of decimals before serializing so ".traj.json" diffs stay small and readable across
+// saves (see Trajectory_Editing.md section 5.2).
+double RoundToDecimals(double value, int decimals)
+{
+    double scale = std::pow(10.0, decimals);
+    return std::round(value * scale) / scale;
+}
+}  // namespace
+
+EntityTrajectory& StudioDataModel::CreateEntityTrajectory(const std::string& entity_name)
+{
+    EntityTrajectory traj;
+    traj.entity_name_ = entity_name;
+    auto result             = entity_trajectories_.emplace(entity_name, std::move(traj));
+    trajectories_modified_  = true;
+    return result.first->second;
+}
+
+void StudioDataModel::RemoveEntityTrajectory(const std::string& entity_name)
+{
+    if (entity_trajectories_.erase(entity_name) > 0)
+        trajectories_modified_ = true;
+}
+
+bool StudioDataModel::SaveTrajJson(const std::string& path)
+{
+    nlohmann::json root;
+    root["version"]     = 1;
+    root["source_xosc"] = FileNameOf(xosc_path_);
+
+    nlohmann::json entities_json = nlohmann::json::object();
+    for (const auto& entry : entity_trajectories_)
+    {
+        const EntityTrajectory& traj = entry.second;
+
+        nlohmann::json path_points_json = nlohmann::json::array();
+        for (const auto& p : traj.path_.points_)
+        {
+            nlohmann::json point_json;
+            point_json["x"]           = RoundToDecimals(p.x, 3);
+            point_json["y"]           = RoundToDecimals(p.y, 3);
+            point_json["z"]           = RoundToDecimals(p.z, 3);
+            point_json["h"]           = RoundToDecimals(p.h, 4);
+            point_json["road_id"]     = p.road_id;
+            point_json["lane_id"]     = p.lane_id;
+            point_json["s"]           = RoundToDecimals(p.s, 3);
+            point_json["lane_offset"] = RoundToDecimals(p.lane_offset, 3);
+            point_json["relative_h"]  = RoundToDecimals(p.relative_h, 4);
+            path_points_json.push_back(point_json);
+        }
+
+        nlohmann::json speed_points_json = nlohmann::json::array();
+        for (const auto& sp : traj.speed_profile_.points_)
+        {
+            nlohmann::json point_json;
+            point_json["s"]     = RoundToDecimals(sp.s, 3);
+            point_json["speed"] = RoundToDecimals(sp.speed, 3);
+            speed_points_json.push_back(point_json);
+        }
+
+        nlohmann::json entity_json;
+        entity_json["path"] = {
+            {"interp_mode", PathInterpModeToString(traj.path_.interp_mode_)},
+            {   "points",                                   path_points_json}
+        };
+        entity_json["speed_profile"] = {
+            {"interp_mode", SpeedInterpModeToString(traj.speed_profile_.interp_mode_)},
+            {   "points",                                  speed_points_json}
+        };
+
+        entities_json[entry.first] = entity_json;
+    }
+    root["entities"] = entities_json;
+
+    std::ofstream file(path);
+    if (!file.is_open())
+    {
+        LOG("Failed to open [%s] for writing trajectories", path.c_str());
+        return false;
+    }
+    file << root.dump(2);
+    file.close();
+
+    trajectories_modified_ = false;
+    LOG("Trajectories saved: [%s]", path.c_str());
+    return true;
+}
+
+bool StudioDataModel::LoadTrajJson(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        return false;
+
+    nlohmann::json root;
+    try
+    {
+        file >> root;
+    }
+    catch (const std::exception& e)
+    {
+        LOG("Failed to parse trajectory file [%s]: %s", path.c_str(), e.what());
+        return false;
+    }
+
+    entity_trajectories_.clear();
+
+    if (root.contains("entities") && root["entities"].is_object())
+    {
+        for (auto it = root["entities"].begin(); it != root["entities"].end(); ++it)
+        {
+            EntityTrajectory traj;
+            traj.entity_name_ = it.key();
+
+            const nlohmann::json& entity_json = it.value();
+
+            if (entity_json.contains("path") && entity_json["path"].contains("points"))
+            {
+                traj.path_.interp_mode_ = StringToPathInterpMode(entity_json["path"].value("interp_mode", "linear"));
+                for (const auto& point_json : entity_json["path"]["points"])
+                {
+                    EntityPose pose;
+                    pose.x           = point_json.value("x", 0.0);
+                    pose.y           = point_json.value("y", 0.0);
+                    pose.z           = point_json.value("z", 0.0);
+                    pose.h           = point_json.value("h", 0.0);
+                    pose.road_id     = point_json.value("road_id", 0);
+                    pose.lane_id     = point_json.value("lane_id", 0);
+                    pose.s           = point_json.value("s", 0.0);
+                    pose.lane_offset = point_json.value("lane_offset", 0.0);
+                    pose.relative_h  = point_json.value("relative_h", 0.0);
+                    pose.source      = EntityPose::SourceRepr::WORLD;
+                    traj.path_.points_.push_back(pose);
+                }
+            }
+
+            if (entity_json.contains("speed_profile") && entity_json["speed_profile"].contains("points"))
+            {
+                traj.speed_profile_.interp_mode_ = StringToSpeedInterpMode(entity_json["speed_profile"].value("interp_mode", "linear"));
+                for (const auto& point_json : entity_json["speed_profile"]["points"])
+                {
+                    SpeedProfilePoint sp;
+                    sp.s     = point_json.value("s", 0.0);
+                    sp.speed = point_json.value("speed", 0.0);
+                    traj.speed_profile_.points_.push_back(sp);
+                }
+            }
+
+            entity_trajectories_[traj.entity_name_] = std::move(traj);
+        }
+    }
+
+    traj_json_path_        = path;
+    trajectories_modified_ = false;
+    LOG("Trajectories loaded: [%s] (%d entities)", path.c_str(), static_cast<int>(entity_trajectories_.size()));
+    return true;
 }

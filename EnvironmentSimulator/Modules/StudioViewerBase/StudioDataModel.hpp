@@ -40,6 +40,152 @@ bool        LoadConfigValue(const std::string& key, int& value);
 bool        LoadConfigValue(const std::string& key, float& value);
 bool        LoadConfigValue(const std::string& key, std::string& value);
 
+// ---------------------------------------------------------------------------------------------------------------
+// Trajectory editing data model (see Trajectory_Editing.md).
+//
+// EntityTrajectory (path_ + speed_profile_) is stored independently from xml_doc_ / the OpenSCENARIO document,
+// persisted to a sidecar ".traj.json" file, and has no effect whatsoever on scenario simulation. It is only used
+// by the editor for its own visualization / editing / preview purposes.
+// ---------------------------------------------------------------------------------------------------------------
+
+// A single path sample point. Keeps both WorldPos and LanePos representations in sync via SyncFromWorld() /
+// SyncFromLane(), which reuse the existing conversion helpers in PosUtil.hpp.
+struct EntityPose
+{
+    // WorldPos
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double h = 0.0;
+
+    // LanePos
+    int    road_id     = 0;
+    int    lane_id     = 0;
+    double s           = 0.0;
+    double lane_offset = 0.0;
+    double relative_h  = 0.0;  // heading relative to the lane driving direction
+
+    // Which representation was most recently edited by the user. Used to avoid unnecessary round-trip
+    // conversions (and the small precision drift / lane ambiguity that comes with them) when only one side
+    // of the pose is actually being edited.
+    enum class SourceRepr
+    {
+        WORLD,
+        LANE
+    };
+    SourceRepr source = SourceRepr::WORLD;
+
+    // Recompute road_id/lane_id/s/lane_offset/relative_h from x/y/z/h.
+    void SyncFromWorld(bool align_to_lane = true);
+
+    // Recompute x/y/z/h from road_id/lane_id/s/lane_offset/relative_h.
+    void SyncFromLane();
+};
+
+// A path made up of user-editable control points (points_). Dense, fixed arc-length samples used for rendering
+// and for the speed profile's distance parameterization can be (re)generated on demand via RebuildDenseSamples().
+class EntityPath
+{
+public:
+    enum class InterpMode
+    {
+        LINEAR,
+        CATMULL_ROM,  // "Spline" in the UI
+        CLOTHOID
+    };
+
+    std::vector<EntityPose> points_;
+    InterpMode               interp_mode_ = InterpMode::LINEAR;
+
+    // Total arc length of the (interpolated) path.
+    double GetTotalLength() const;
+
+    // Evaluate the path at arc length s (clamped to [0, GetTotalLength()]).
+    EntityPose Evaluate(double s) const;
+
+    // Find the point in points_ (not the dense samples) closest to (x, y) in the XY plane.
+    // Returns -1 if points_ is empty.
+    int FindNearestPointIndex(double x, double y) const;
+
+    // Insert a new control point so that points_ stays ordered by (approximate, polyline-based) arc length.
+    // Returns the index the point was inserted at.
+    int InsertPoint(double s, const EntityPose& pose);
+
+    // Remove the control point at index (no-op if index is out of range).
+    void RemovePoint(int index);
+
+    // (Re)generate dense_samples_ at a fixed arc length interval ds, following interp_mode_.
+    void RebuildDenseSamples(double ds = 0.5);
+
+    const std::vector<EntityPose>& DenseSamples() const
+    {
+        return dense_samples_;
+    }
+
+private:
+    std::vector<EntityPose> dense_samples_;  // cache for rendering; not persisted to JSON
+
+    // Build a fine-grained polyline approximation of the interpolated curve plus its cumulative arc length,
+    // shared by GetTotalLength()/Evaluate()/RebuildDenseSamples().
+    void BuildFineSamples(std::vector<EntityPose>* out_poses, std::vector<double>* out_cumulative_s) const;
+};
+
+// A single distance-based speed profile point.
+struct SpeedProfilePoint
+{
+    double s     = 0.0;  // position along the owning EntityPath's arc length (distance-based)
+    double speed = 0.0;  // target speed at that position, in m/s
+};
+
+// A distance-based speed profile: speed as a function of arc length s along the owning EntityPath.
+class EntitySpeedProfile
+{
+public:
+    enum class InterpMode
+    {
+        LINEAR,
+        MONOTONIC_CUBIC
+    };
+
+    std::vector<SpeedProfilePoint> points_;
+    InterpMode                     interp_mode_ = InterpMode::LINEAR;
+
+    // Evaluate the speed at arc length s (clamped to the profile's [first, last] range).
+    double EvaluateSpeed(double s) const;
+
+    // Insert a new point so that points_ stays ordered by s. Returns the index it was inserted at.
+    int InsertPoint(double s, double speed);
+
+    // Remove the point at index (no-op if index is out of range).
+    void RemovePoint(int index);
+
+    // Numerically integrate ds / v(s) from 0 to s (used to drive the ghost preview animation, see
+    // Trajectory_Editing.md section 9.3). Very low speeds are clamped to avoid divide-by-zero.
+    double EvaluateTimeAtS(double s) const;
+
+    // Inverse of EvaluateTimeAtS: given an elapsed time, find the corresponding arc length s.
+    double EvaluateSAtTime(double t) const;
+};
+
+// Binds together the path and speed profile of a single trajectory-editor-only vehicle. Such vehicles are
+// created via the "Add Trajectory" interaction (Trajectory_Editing.md section 6) and never correspond to any
+// xosc ScenarioObject.
+class EntityTrajectory
+{
+public:
+    std::string        entity_name_;  // only exists in .traj.json, never in xml_doc_
+    EntityPath          path_;
+    EntitySpeedProfile  speed_profile_;
+
+    bool HasPath() const
+    {
+        return !path_.points_.empty();
+    }
+};
+
+// Derive the ".traj.json" sidecar path from a ".xosc" path, e.g. "scenario.xosc" -> "scenario.traj.json".
+std::string DeriveTrajJsonPath(const std::string& xosc_path);
+
 class StudioDataModel
 {
 public:
@@ -61,6 +207,14 @@ public:
     void Clear();
     bool LoadXoscXml(const std::string& path);
     bool SaveXoscXml(const std::string& path);
+
+    // Trajectory editing (Trajectory_Editing.md): entity_trajectories_ is independent from xml_doc_, persisted to
+    // its own ".traj.json" sidecar file. Not wired into LoadXoscXml/SaveXoscXml - it is saved/loaded through its
+    // own dedicated "Save Trajectories" entry point.
+    bool              LoadTrajJson(const std::string& path);
+    bool              SaveTrajJson(const std::string& path);
+    EntityTrajectory& CreateEntityTrajectory(const std::string& entity_name);
+    void              RemoveEntityTrajectory(const std::string& entity_name);
 
     void LoadConfig();
     void SaveConfig();
@@ -159,6 +313,11 @@ public:
     pugi::xml_document xml_doc_;
     pugi::xml_document xml_schema_;
     bool               markers_to_update_ = false;  // Track if markers have been updated
+
+    // Trajectory editing data (see EntityTrajectory above); independent from xml_doc_ and saved separately.
+    std::map<std::string, EntityTrajectory> entity_trajectories_;
+    std::string                             traj_json_path_;               // derived from xosc_path_, see DeriveTrajJsonPath()
+    bool                                    trajectories_modified_ = false;  // dirty flag independent from modified_
 
     // Window configuration (adjustable and persisted)
     int   xml_panel_width_  = DEFAULT_XML_PANEL_WIDTH;

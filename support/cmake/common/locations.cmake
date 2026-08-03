@@ -69,6 +69,8 @@ macro(set_project_external_paths)
         ${EXTERNALS_PATH}/osi)
     set(EXTERNALS_PUGIXML_PATH
         ${EXTERNALS_PATH}/pugixml)
+    set(EXTERNALS_JSON_PATH
+        ${EXTERNALS_PATH}/json)
     set(EXTERNALS_SUMO_PATH
         ${EXTERNALS_PATH}/sumo)
     set(EXTERNALS_IMPLOT_PATH
