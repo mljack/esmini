@@ -315,7 +315,7 @@ private:
 
 ### 7.3 主循环整合点
 
-不再把绘制调用放在 `StudioGui::Render` 内仅 COMPOSER 分支执行的位置（[StudioGui.cpp:486](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L486)），而是在 `main.cpp` 的三个模式分支（[main.cpp:263](EnvironmentSimulator/Applications/scenariostudio/main.cpp#L263)、[287](EnvironmentSimulator/Applications/scenariostudio/main.cpp#L287)、[388](EnvironmentSimulator/Applications/scenariostudio/main.cpp#L388)）各自的帧循环里统一调用 `g_trajectory_renderer.Update(*g_data_model, g_data_model->mode_, g_data_model->virtual_time_)`，保证三种模式每帧都执行。
+**实现时的简化**：`StudioGui::Render(osg::RenderInfo&)` 是通过 `camera->addPostDrawCallback(new ImGuiRenderCallback(*this))`（在 `StudioGui::handle()` 里注册一次）挂到 `osgViewer_` 的相机上的，而 COMPOSER/VIEWER/INSPECTOR 三种模式共用同一个 `g_viewer`/`osgViewer_` 实例（VIEWER 模式下 `ScenarioPlayer` 通过 `RegisterExternalViewer` 复用它、INSPECTOR 模式下 `replayer::Run` 同样复用它），所以 `Render()` 本身在三种模式下每帧都会被调用——不需要像最初设想的那样去改 `main.cpp` 里三个模式各自的帧循环。实际实现是在 `StudioGui::Render()` 内、`UpdateMousePositionFromWorld()` 之后无条件调用一次 `trajectory_renderer_.Update(data_model_, data_model_.mode_, data_model_.virtual_time_)`，效果与本节最初的方案一致（三种模式每帧都执行），但改动面更小、风险更低。
 
 ### 7.4 拾取与交互
 
