@@ -54,6 +54,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
+#include "implot.h"
 
 extern std::vector<std::string> g_paths;
 
@@ -299,6 +300,7 @@ StudioGui::StudioGui(viewer::StudioViewer* viewer)
 {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    ImPlot::CreateContext();
     ImGuiIO& io    = ImGui::GetIO();
     io.IniFilename = NULL;
     io.LogFilename = NULL;
@@ -315,6 +317,10 @@ StudioGui::StudioGui(viewer::StudioViewer* viewer)
 
     // Load window configuration from file
     data_model_.LoadConfig();
+
+    // Mount the trajectory-editing overlay once, independent of StudioViewer/ScenarioPlayer's own scene graph
+    // ownership (Trajectory_Editing.md section 7.1).
+    trajectory_renderer_.Init(viewer_->rootnode_);
 }
 
 void StudioGui::PrepareReader()
@@ -333,6 +339,11 @@ StudioGui::~StudioGui()
 
 void StudioGui::Exit()
 {
+    if (data_model_.modified_ || data_model_.trajectories_modified_)
+    {
+        exit_confirm_dialog_active_ = true;
+        return;
+    }
     data_model_.mode_ = StudioMode::ZOMBIE;
     viewer_->osgViewer_->setDone(true);
 }
@@ -460,6 +471,21 @@ void StudioGui::Render(osg::RenderInfo&)
     UpdateMousePositionFromWorld();
     RenderRealTimeHUD();
     RenderValidationReport();
+    HandleExitConfirmDialog();
+
+    // Trajectory-editor-only rendering (Trajectory_Editing.md section 7): independent of
+    // viewer::StudioViewer/ScenarioPlayer's scene graph ownership, updated every frame in every mode.
+    trajectory_renderer_.Update(data_model_, data_model_.mode_, data_model_.virtual_time_);
+    if (trajectory_picking_active_)
+    {
+        auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
+        if (it != data_model_.entity_trajectories_.end())
+            trajectory_renderer_.UpdatePickingPreview(it->second.path_.points_, hud_mouse_world_x_, hud_mouse_world_y_, hud_mouse_world_z_);
+    }
+    else
+    {
+        trajectory_renderer_.ClearPickingPreview();
+    }
 
     if (pending_move_count_ > 0)
     {
@@ -510,6 +536,10 @@ void StudioGui::RenderXmlTree()
     xml_panel_status = ImGui::Begin("XML Tree", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
     if (xml_panel_status)
     {
+        if (ImGui::BeginTabBar("RightPanelTabs"))
+        {
+        if (ImGui::BeginTabItem("XML Tree"))
+        {
         ImGui::BeginGroup();
         ImGui::PushItemWidth(150);
         static bool reclaim_focus = false;
@@ -703,6 +733,16 @@ void StudioGui::RenderXmlTree()
         RenderXmlSubTree(data_model_.RootNode(), 0);
         ImGui::PopItemWidth();
         ImGui::EndChild();
+        ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Trajectories"))
+        {
+            RenderTrajectoriesTab();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
 
         HandleElementContextMenu();
         HandleAttrDialog();
@@ -710,6 +750,7 @@ void StudioGui::RenderXmlTree()
         HandleMovePositionMenu();
         HandleViewportContextMenu();
         HandleAddVehicleDialog();
+        HandleAddTrajectoryDialog();
     }
     ImGui::End();
 }
@@ -1292,6 +1333,10 @@ void StudioGui::HandleViewportContextMenu()
         {
             OpenAddVehicleDialog();
         }
+        if (ImGui::MenuItem("Add Trajectory"))
+        {
+            OpenAddTrajectoryDialog();
+        }
         ImGui::EndPopup();
     }
 }
@@ -1397,6 +1442,399 @@ void StudioGui::HandleAddVehicleDialog()
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Trajectory editing (Trajectory_Editing.md): "Add Trajectory" creates a brand-new vehicle that only ever
+// exists in entity_trajectories_ / .traj.json, entirely independent from Add Vehicle / xml_doc_ (section 6).
+// ---------------------------------------------------------------------------------------------------------------
+
+void StudioGui::OpenAddTrajectoryDialog()
+{
+    // Suggest a unique name across BOTH namespaces (xosc ScenarioObjects and entity_trajectories_), so the map
+    // view never shows two differently-sourced objects sharing the same name (Trajectory_Editing.md 6.1/12).
+    int         suffix = 1;
+    std::string candidate;
+    do
+    {
+        candidate = "traj_" + std::to_string(suffix++);
+    } while (data_model_.NameExists(candidate, pugi::xml_node()) || data_model_.entity_trajectories_.count(candidate) > 0);
+
+    add_trajectory_name_        = candidate;
+    add_trajectory_init_speed_  = 0.0f;
+    add_trajectory_interp_mode_ = 1;  // Spline by default
+    add_trajectory_dialog_to_open_ = true;
+}
+
+void StudioGui::HandleAddTrajectoryDialog()
+{
+    if (add_trajectory_dialog_to_open_)
+    {
+        add_trajectory_dialog_to_open_ = false;
+        add_trajectory_dialog_active_  = true;
+        ImGui::OpenPopup("Add Trajectory");
+    }
+
+    ImGuiIO& io     = ImGui::GetIO();
+    ImVec2   center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Add Trajectory", &add_trajectory_dialog_active_, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::TextUnformatted("This creates a brand-new vehicle stored only in .traj.json, not in the OpenSCENARIO file.");
+
+        // Entity name input
+        ImGui::TextUnformatted("Name");
+        add_trajectory_name_.resize(256);
+        ImGui::InputText("##add_trajectory_name", add_trajectory_name_.data(), add_trajectory_name_.size());
+        std::string entered_name = add_trajectory_name_.c_str();
+
+        // Init speed input (becomes the sole initial speed_profile_ point, unrelated to any xosc SpeedAction)
+        ImGui::TextUnformatted("Init Speed (m/s)");
+        ImGui::InputFloat("##add_trajectory_speed", &add_trajectory_init_speed_, 0.0f, 0.0f, "%.2f");
+
+        // Path interpolation mode, default Spline (Trajectory_Editing.md 6.1/9.1)
+        ImGui::TextUnformatted("Path Interpolation");
+        const char* interp_labels[] = {"Linear", "Spline", "Clothoid"};
+        ImGui::Combo("##add_trajectory_interp", &add_trajectory_interp_mode_, interp_labels, IM_ARRAYSIZE(interp_labels));
+
+        // Validate the name across both the xosc and entity_trajectories_ namespaces (section 6.1/12)
+        bool name_empty = entered_name.empty();
+        bool is_duplicate =
+            !name_empty && (data_model_.NameExists(entered_name, pugi::xml_node()) || data_model_.entity_trajectories_.count(entered_name) > 0);
+        bool can_confirm = !name_empty && !is_duplicate;
+
+        if (name_empty)
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Name cannot be empty.");
+        else if (is_duplicate)
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "An entity or trajectory named '%s' already exists.", entered_name.c_str());
+
+        if (!can_confirm)
+            ImGui::BeginDisabled(true);
+        bool confirmed = ImGui::Button("Confirm", ImVec2(120, 0));
+        if (!can_confirm)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        bool cancelled = ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressedMap(ImGuiKey_Escape);
+        if (can_confirm && ImGui::IsKeyPressedMap(ImGuiKey_Enter))
+            confirmed = true;
+
+        if (confirmed && can_confirm)
+        {
+            EntityTrajectory& traj = data_model_.CreateEntityTrajectory(entered_name);
+            traj.path_.interp_mode_ =
+                (add_trajectory_interp_mode_ == 0)   ? EntityPath::InterpMode::LINEAR
+                : (add_trajectory_interp_mode_ == 2) ? EntityPath::InterpMode::CLOTHOID
+                                                      : EntityPath::InterpMode::CATMULL_ROM;
+            SpeedProfilePoint init_point;
+            init_point.s     = 0.0;
+            init_point.speed = static_cast<double>(add_trajectory_init_speed_);
+            traj.speed_profile_.points_.push_back(init_point);
+
+            StartTrajectoryPicking(entered_name);
+
+            add_trajectory_dialog_active_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        else if (cancelled)
+        {
+            add_trajectory_dialog_active_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void StudioGui::StartTrajectoryPicking(const std::string& entity_name)
+{
+    // Mutually exclusive with the other viewport interaction modes (Trajectory_Editing.md 6.2): cancel
+    // whichever one happens to be active rather than letting two interactions run at once.
+    if (heading_operation_active_)
+        CancelHeadingOperation();
+    if (move_operation_active_)
+        EndMoveOperation();
+    if (trajectory_point_drag_active_)
+        EndTrajectoryPointDrag();
+
+    trajectory_picking_active_       = true;
+    trajectory_picking_entity_name_  = entity_name;
+}
+
+void StudioGui::CommitTrajectoryPickingPoint()
+{
+    if (!trajectory_picking_active_)
+        return;
+
+    auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
+    if (it == data_model_.entity_trajectories_.end())
+    {
+        LOG("Trajectory picking: entity [%s] disappeared while picking, aborting", trajectory_picking_entity_name_.c_str());
+        trajectory_picking_active_ = false;
+        return;
+    }
+
+    UpdateMousePositionFromWorld();
+
+    EntityPose pose;
+    pose.x = hud_mouse_world_x_;
+    pose.y = hud_mouse_world_y_;
+    pose.z = hud_mouse_world_z_;
+    pose.h = 0.0;
+    pose.SyncFromWorld(/*align_to_lane=*/true);
+    pose.SyncFromLane();  // snap x/y/z onto the matched lane so the point sits on the road surface
+
+    it->second.path_.points_.push_back(pose);
+    data_model_.trajectories_modified_ = true;
+    trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
+}
+
+void StudioGui::FinishTrajectoryPicking()
+{
+    if (!trajectory_picking_active_)
+        return;
+
+    auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
+    if (it == data_model_.entity_trajectories_.end() || it->second.path_.points_.empty())
+    {
+        // Enter with zero points picked so far is ignored (Trajectory_Editing.md 6.1/15).
+        return;
+    }
+
+    trajectory_picking_active_ = false;
+    trajectory_renderer_.ClearPickingPreview();
+}
+
+void StudioGui::CancelTrajectoryPickingPoint()
+{
+    if (!trajectory_picking_active_)
+        return;
+
+    auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
+    if (it != data_model_.entity_trajectories_.end() && !it->second.path_.points_.empty())
+    {
+        it->second.path_.points_.pop_back();
+        trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
+        return;
+    }
+
+    // No point left to undo: abandon the whole new trajectory (Trajectory_Editing.md 6.1).
+    data_model_.RemoveEntityTrajectory(trajectory_picking_entity_name_);
+    trajectory_renderer_.RemoveEntity(trajectory_picking_entity_name_);
+    trajectory_picking_active_ = false;
+    trajectory_renderer_.ClearPickingPreview();
+}
+
+bool StudioGui::StartTrajectoryPointDrag()
+{
+    const double kPickRadius = 2.0;  // meters, in the ground plane
+
+    std::string best_entity;
+    int         best_index    = -1;
+    double      best_dist_sqr = kPickRadius * kPickRadius;
+
+    for (auto& entry : data_model_.entity_trajectories_)
+    {
+        int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
+        if (index < 0)
+            continue;
+
+        const EntityPose& p  = entry.second.path_.points_[static_cast<size_t>(index)];
+        double            dx = p.x - hud_mouse_world_x_;
+        double            dy = p.y - hud_mouse_world_y_;
+        double            d2 = dx * dx + dy * dy;
+        if (d2 < best_dist_sqr)
+        {
+            best_dist_sqr = d2;
+            best_entity   = entry.first;
+            best_index    = index;
+        }
+    }
+
+    if (best_index < 0)
+        return false;
+
+    trajectory_point_drag_active_ = true;
+    trajectory_drag_entity_name_  = best_entity;
+    trajectory_drag_point_index_  = best_index;
+    return true;
+}
+
+void StudioGui::UpdateTrajectoryPointDrag()
+{
+    if (!trajectory_point_drag_active_)
+        return;
+
+    auto it = data_model_.entity_trajectories_.find(trajectory_drag_entity_name_);
+    if (it == data_model_.entity_trajectories_.end() || trajectory_drag_point_index_ < 0 ||
+        static_cast<size_t>(trajectory_drag_point_index_) >= it->second.path_.points_.size())
+    {
+        trajectory_point_drag_active_ = false;
+        return;
+    }
+
+    UpdateMousePositionFromWorld();
+
+    EntityPose& pose = it->second.path_.points_[static_cast<size_t>(trajectory_drag_point_index_)];
+    pose.x           = hud_mouse_world_x_;
+    pose.y           = hud_mouse_world_y_;
+    pose.z           = hud_mouse_world_z_;
+    pose.SyncFromWorld(/*align_to_lane=*/true);
+    pose.SyncFromLane();
+
+    data_model_.trajectories_modified_ = true;
+    trajectory_renderer_.MarkDirty(trajectory_drag_entity_name_);
+}
+
+void StudioGui::EndTrajectoryPointDrag()
+{
+    trajectory_point_drag_active_ = false;
+    trajectory_drag_point_index_  = -1;
+    trajectory_drag_entity_name_.clear();
+}
+
+void StudioGui::RenderTrajectoriesTab()
+{
+    if (data_model_.entity_trajectories_.empty())
+    {
+        ImGui::TextDisabled("No trajectories yet. Right-click the map view and choose 'Add Trajectory'.");
+        return;
+    }
+
+    std::string entity_to_delete;
+
+    for (auto& entry : data_model_.entity_trajectories_)
+    {
+        const std::string& name = entry.first;
+        EntityTrajectory&   traj = entry.second;
+
+        ImGui::PushID(name.c_str());
+        if (ImGui::CollapsingHeader(name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
+            // editable only by dragging in the map view / the speed chart below, not via text input here.
+            if (!traj.path_.points_.empty())
+            {
+                const EntityPose& p0 = traj.path_.points_.front();
+                ImGui::Text("Initial position: x=%.2f, y=%.2f, road %d lane %d s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
+            }
+            else
+            {
+                ImGui::TextDisabled("Initial position: (no path points)");
+            }
+
+            double init_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.front().speed;
+            ImGui::Text("Initial speed: %.2f m/s", init_speed);
+
+            double length = traj.path_.GetTotalLength();
+            ImGui::Text("Path: %d points, %.1f m", static_cast<int>(traj.path_.points_.size()), length);
+
+            if (ImGui::Button("Delete"))
+                entity_to_delete = name;
+
+            // Speed Profile chart (Trajectory_Editing.md 8.2): X axis is arc length s, Y axis is speed.
+            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200)))
+            {
+                ImPlot::SetupAxes("s (m)", "speed (m/s)");
+                ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, std::max(1.0, length), ImGuiCond_Once);
+
+                std::vector<double> xs, ys;
+                xs.reserve(traj.speed_profile_.points_.size());
+                ys.reserve(traj.speed_profile_.points_.size());
+                for (const auto& sp : traj.speed_profile_.points_)
+                {
+                    xs.push_back(sp.s);
+                    ys.push_back(sp.speed);
+                }
+
+                if (!xs.empty())
+                {
+                    ImPlot::PlotLine("speed", xs.data(), ys.data(), static_cast<int>(xs.size()));
+
+                    for (size_t i = 0; i < xs.size(); i++)
+                    {
+                        double x = xs[i];
+                        double y = ys[i];
+                        if (ImPlot::DragPoint(static_cast<int>(i), &x, &y, ImVec4(1.0f, 0.55f, 0.0f, 1.0f), 6.0f))
+                        {
+                            x = std::max(0.0, x);
+                            y = std::max(0.0, y);
+                            traj.speed_profile_.points_[i].s     = x;
+                            traj.speed_profile_.points_[i].speed = y;
+                            data_model_.trajectories_modified_   = true;
+                            trajectory_renderer_.MarkDirty(name);
+                        }
+                    }
+                }
+
+                if (ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                {
+                    ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+                    traj.speed_profile_.InsertPoint(std::max(0.0, mouse.x), std::max(0.0, mouse.y));
+                    data_model_.trajectories_modified_ = true;
+                    trajectory_renderer_.MarkDirty(name);
+                }
+
+                ImPlot::EndPlot();
+            }
+        }
+        ImGui::PopID();
+    }
+
+    if (!entity_to_delete.empty())
+    {
+        data_model_.RemoveEntityTrajectory(entity_to_delete);
+        trajectory_renderer_.RemoveEntity(entity_to_delete);
+        if (trajectory_picking_active_ && trajectory_picking_entity_name_ == entity_to_delete)
+            trajectory_picking_active_ = false;
+    }
+}
+
+void StudioGui::HandleExitConfirmDialog()
+{
+    if (exit_confirm_dialog_active_)
+        ImGui::OpenPopup("Unsaved Changes");
+
+    ImGuiIO& io     = ImGui::GetIO();
+    ImVec2   center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Unsaved Changes", &exit_confirm_dialog_active_, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Merged prompt covering both independent save entry points (Trajectory_Editing.md 5.4/13): no need to
+        // ask separately about OpenSCENARIO vs. Trajectories changes.
+        ImGui::TextUnformatted("OpenSCENARIO and/or Trajectories have unsaved changes.");
+        ImGui::TextUnformatted("Do you want to save before exiting?");
+
+        if (ImGui::Button("Save All && Exit", ImVec2(140, 0)))
+        {
+            if (data_model_.modified_ && !data_model_.xosc_path_.empty())
+                data_model_.SaveXoscXml(data_model_.xosc_path_);
+            if (data_model_.trajectories_modified_ && !data_model_.traj_json_path_.empty())
+                data_model_.SaveTrajJson(data_model_.traj_json_path_);
+            exit_confirm_dialog_active_      = false;
+            data_model_.mode_                = StudioMode::ZOMBIE;
+            viewer_->osgViewer_->setDone(true);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard && Exit", ImVec2(140, 0)))
+        {
+            exit_confirm_dialog_active_ = false;
+            data_model_.mode_           = StudioMode::ZOMBIE;
+            viewer_->osgViewer_->setDone(true);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressedMap(ImGuiKey_Escape))
+        {
+            exit_confirm_dialog_active_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
 void StudioGui::HandleEsminiSettingsDialog()
 {
     if (data_model_.esmini_settings_dialog_to_open_)
@@ -1474,16 +1912,30 @@ void StudioGui::RenderMenuBar()
 
                         // Automatically try to load the OpenDRIVE file referenced in the scenario
                         TryLoadOpenDriveFromScenario();
+
+                        // Load the independent trajectory sidecar file if one exists next to the scenario
+                        // (Trajectory_Editing.md 5.4). entity_trajectories_ has no relationship to xml_doc_'s
+                        // entities, so this is purely "load whatever was saved before", no generation/sync.
+                        data_model_.traj_json_path_ = DeriveTrajJsonPath(result[0]);
+                        data_model_.LoadTrajJson(data_model_.traj_json_path_);
                     }
                 }
             }
-            if (ImGui::MenuItem("Save", "Ctrl+S"))
+            if (ImGui::MenuItem("Save OpenSCENARIO", "Ctrl+S"))
                 to_save_file = true;
             if (ImGui::MenuItem("Save As..."))
             {
                 to_save_file = true;
                 backup_path  = data_model_.xosc_path_;
                 data_model_.xosc_path_.clear();
+            }
+            if (ImGui::MenuItem("Save Trajectories", nullptr, false, !data_model_.entity_trajectories_.empty() || data_model_.trajectories_modified_))
+            {
+                std::string path = data_model_.traj_json_path_;
+                if (path.empty())
+                    path = DeriveTrajJsonPath(data_model_.xosc_path_.empty() ? "scenario.xosc" : data_model_.xosc_path_);
+                data_model_.traj_json_path_ = path;
+                data_model_.SaveTrajJson(path);
             }
             if (ImGui::MenuItem("Open an OpenDRIVE File ...", nullptr, false, in_composer_mode))
             {
@@ -1891,10 +2343,17 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             }
             else if (!isKeyDown && c == osgGA::GUIEventAdapter::KEY_Escape && !wantCaptureKeyboard)
             {
-                if (heading_operation_active_)
+                if (trajectory_picking_active_)
+                    CancelTrajectoryPickingPoint();
+                else if (heading_operation_active_)
                     CancelHeadingOperation();
                 else if (data_model_.mode_ != StudioMode::COMPOSER)
                     SwitchToComposer();
+            }
+            else if (!isKeyDown && !wantCaptureKeyboard && trajectory_picking_active_ &&
+                     (c == osgGA::GUIEventAdapter::KEY_Return || c == osgGA::GUIEventAdapter::KEY_KP_Enter))
+            {
+                FinishTrajectoryPicking();
             }
 
             // Legacy Ctrl shortcuts handling (can be removed if ImGui handles them, but keeping for safety)
@@ -1931,7 +2390,17 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                 {
                     if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
                     {
-                        if (heading_operation_active_)
+                        if (trajectory_picking_active_)
+                        {
+                            // Continuous point-picking for a new trajectory (Trajectory_Editing.md 6.1)
+                            CommitTrajectoryPickingPoint();
+                        }
+                        else if (!heading_operation_active_ && !move_operation_active_ && StartTrajectoryPointDrag())
+                        {
+                            // Clicked near an existing trajectory path point: start dragging it instead of
+                            // falling through to the xosc entity picking logic below (Trajectory_Editing.md 7.4).
+                        }
+                        else if (heading_operation_active_)
                         {
                             // Left click confirms the heading modification
                             ConfirmHeadingOperation();
@@ -1986,6 +2455,13 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                 }
                 right_click_candidate_ = false;
             }
+
+            // End a trajectory point drag on left-button release (Trajectory_Editing.md 7.4)
+            if (!wantCaptureMouse && ea.getEventType() == osgGA::GUIEventAdapter::RELEASE &&
+                ea.getButton() == osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON && trajectory_point_drag_active_)
+            {
+                EndTrajectoryPointDrag();
+            }
         }
         case osgGA::GUIEventAdapter::DRAG:
         case osgGA::GUIEventAdapter::MOVE:
@@ -2006,6 +2482,12 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             if (move_operation_active_)
             {
                 UpdateMoveOperation();
+            }
+
+            // Update a trajectory point drag if active (Trajectory_Editing.md 7.4)
+            if (trajectory_point_drag_active_)
+            {
+                UpdateTrajectoryPointDrag();
             }
 
             // Track the mouse direction while modifying a heading

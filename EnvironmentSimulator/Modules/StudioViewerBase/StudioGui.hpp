@@ -20,6 +20,7 @@
 #include "CommonMini.hpp"
 #include "OSCBoundingBox.hpp"  // For OSCBoundingBox structure
 #include "ScenarioReader.hpp"
+#include "TrajectoryRenderer.hpp"
 #include <deque>
 #include <string>
 #include <utility>
@@ -118,6 +119,28 @@ private:
     void HandleAddVehicleDialog();
     void OpenAddVehicleDialog();
 
+    // Trajectory editing (Trajectory_Editing.md): "Add Trajectory" creates a brand-new vehicle that only
+    // exists in entity_trajectories_ / .traj.json, entirely independent from Add Vehicle / xml_doc_.
+    void OpenAddTrajectoryDialog();
+    void HandleAddTrajectoryDialog();
+    void RenderTrajectoriesTab();
+
+    // Continuous point-picking interaction driven from HandleAddTrajectoryDialog()'s Confirm button; see
+    // Trajectory_Editing.md section 6.1 for the Enter/Esc semantics.
+    void StartTrajectoryPicking(const std::string& entity_name);
+    void CommitTrajectoryPickingPoint();
+    void FinishTrajectoryPicking();
+    void CancelTrajectoryPickingPoint();
+
+    // Dragging an existing path point in the map view (Trajectory_Editing.md section 7.4 / 6.3).
+    bool StartTrajectoryPointDrag();
+    void UpdateTrajectoryPointDrag();
+    void EndTrajectoryPointDrag();
+
+    // Unsaved-changes confirmation shown from the "Exit" menu item / window close (merged prompt covering
+    // both modified_ and trajectories_modified_, see Trajectory_Editing.md section 5.4/13).
+    void HandleExitConfirmDialog();
+
     std::vector<std::string> GetVehicleCatalogEntryNames() const;
     void RenderMenuBar();
     void RenderTimeline();
@@ -156,6 +179,29 @@ private:
     std::string              add_vehicle_catalog_name_;
     std::vector<std::string> add_vehicle_entry_options_;
     float                    add_vehicle_init_speed_ = 0.0f;
+
+    // "Add Trajectory" modal dialog state (Trajectory_Editing.md section 6.1). Uses the same "Viewport Context
+    // Menu" popup as Add Vehicle, but its own independent dialog implementation.
+    bool        add_trajectory_dialog_to_open_ = false;
+    bool        add_trajectory_dialog_active_  = false;
+    std::string add_trajectory_name_;
+    float       add_trajectory_init_speed_     = 0.0f;
+    int         add_trajectory_interp_mode_    = 1;  // 0=Linear, 1=Spline (default), 2=Clothoid
+
+    // Continuous point-picking session state (section 6.1): trajectory_picking_active_ is true from the moment
+    // the Add Trajectory dialog is confirmed until Enter commits or Esc cancels the whole thing.
+    bool        trajectory_picking_active_ = false;
+    std::string trajectory_picking_entity_name_;
+
+    // Path point dragging state (section 6.3 / 7.4).
+    bool        trajectory_point_drag_active_ = false;
+    std::string trajectory_drag_entity_name_;
+    int         trajectory_drag_point_index_  = -1;
+
+    // Unsaved-changes-on-exit confirmation (section 5.4/13)
+    bool exit_confirm_dialog_active_ = false;
+
+    EntityTrajectoryRenderer trajectory_renderer_;
 
     // Heading modify operation state
     bool         heading_operation_active_         = false;

@@ -18,7 +18,8 @@ set(SOURCES
     XmlUtil.cpp
     StudioGui.cpp
     StudioViewer.cpp
-    TopViewManipulator.cpp)
+    TopViewManipulator.cpp
+    TrajectoryRenderer.cpp)
 
 set(INCLUDES
     StudioDataModel.hpp
@@ -27,7 +28,8 @@ set(INCLUDES
     XmlUtil.hpp
     StudioGui.hpp
     StudioViewer.hpp
-    TopViewManipulator.hpp)
+    TopViewManipulator.hpp
+    TrajectoryRenderer.hpp)
 
 # ############################### Setting target files ###############################################################
 
