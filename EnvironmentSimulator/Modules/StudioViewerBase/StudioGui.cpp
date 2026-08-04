@@ -2294,7 +2294,7 @@ void StudioGui::RenderMenuBar()
                     }
                 }
             }
-            if (ImGui::MenuItem("Save Trajectories", nullptr, false, !data_model_.entity_trajectories_.empty() || data_model_.trajectories_modified_))
+            if (ImGui::MenuItem("Save Trajectories", "Ctrl+S", false, !data_model_.entity_trajectories_.empty() || data_model_.trajectories_modified_))
             {
                 std::string path = data_model_.traj_json_path_;
                 if (path.empty())
@@ -2341,6 +2341,16 @@ void StudioGui::RenderMenuBar()
             }
             if (to_save_file)
                 data_model_.SaveXoscXml(data_model_.xosc_path_);
+            // Ctrl+S / Save OpenSCENARIO / Save As all save the trajectory sidecar too (Trajectory_Editing.md
+            // 5.4/13): the two files are independent, but a single save shortcut should not leave one behind.
+            if (to_save_file && (!data_model_.entity_trajectories_.empty() || data_model_.trajectories_modified_))
+            {
+                std::string traj_path = data_model_.traj_json_path_;
+                if (traj_path.empty())
+                    traj_path = DeriveTrajJsonPath(data_model_.xosc_path_.empty() ? "scenario.xosc" : data_model_.xosc_path_);
+                data_model_.traj_json_path_ = traj_path;
+                data_model_.SaveTrajJson(traj_path);
+            }
             to_save_file = false;
         }
 
