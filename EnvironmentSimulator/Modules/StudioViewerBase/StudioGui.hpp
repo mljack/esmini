@@ -139,6 +139,12 @@ private:
     void UpdateTrajectoryPointDrag();
     void EndTrajectoryPointDrag();
 
+    // Right-click on/near a path point or path in the map view (Trajectory_Editing.md 7.4/8.2): sets up
+    // trajectory_(point|insert)_context_* and returns true if the click landed close enough to a trajectory
+    // path/point to be handled here, so the caller doesn't fall through to the xosc entity Move/Add Vehicle
+    // context menus. Actual popup rendering happens in HandleViewportContextMenu().
+    bool HandleTrajectoryPointRightClick();
+
     // Unsaved-changes confirmation shown from the "Exit" menu item / window close (merged prompt covering
     // both modified_ and trajectories_modified_, see Trajectory_Editing.md section 5.4/13).
     void HandleExitConfirmDialog();
@@ -220,6 +226,22 @@ private:
     double      trajectory_drag_start_mouse_y_ = 0.0;
     double      trajectory_drag_start_point_x_ = 0.0;
     double      trajectory_drag_start_point_y_ = 0.0;
+
+    // 3D view right-click Delete Point / Insert Point menus (Trajectory_Editing.md 7.4/8.2, mirroring the
+    // speed profile chart's right-click menu): right-clicking on/near an existing path point offers Delete
+    // Point; right-clicking near the path but not on a point offers Insert Point at the projected location.
+    // Both are deferred-open (set from handle() on right-click release, opened from HandleViewportContextMenu()
+    // on the next Render()), matching the existing add_vehicle_context_menu_to_open_ pattern.
+    bool        trajectory_point_context_menu_to_open_ = false;
+    std::string trajectory_context_entity_name_;
+    int         trajectory_context_point_index_ = -1;  // Delete Point target
+
+    bool        trajectory_insert_context_menu_to_open_ = false;
+    std::string trajectory_insert_context_entity_name_;
+    double      trajectory_insert_context_x_ = 0.0;
+    double      trajectory_insert_context_y_ = 0.0;
+    double      trajectory_insert_context_z_ = 0.0;
+    double      trajectory_insert_context_s_ = 0.0;
 
     // Speed profile chart selection/drag state (section 8.2): a click selects a point (highlighted red in the
     // chart and its row in the table below); only the selected point can be dragged, and only in the same

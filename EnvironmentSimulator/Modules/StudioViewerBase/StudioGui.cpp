@@ -1348,6 +1348,76 @@ void StudioGui::HandleViewportContextMenu()
         }
         ImGui::EndPopup();
     }
+
+    // Right-click Delete Point, for a click on/near an existing path point (Trajectory_Editing.md 7.4).
+    if (trajectory_point_context_menu_to_open_)
+    {
+        trajectory_point_context_menu_to_open_ = false;
+        ImGui::OpenPopup("Trajectory Point Context Menu");
+    }
+    if (ImGui::BeginPopup("Trajectory Point Context Menu"))
+    {
+        auto it = data_model_.entity_trajectories_.find(trajectory_context_entity_name_);
+        if (it != data_model_.entity_trajectories_.end() && trajectory_context_point_index_ >= 0 &&
+            static_cast<size_t>(trajectory_context_point_index_) < it->second.path_.points_.size())
+        {
+            bool can_delete = it->second.path_.points_.size() > 1;  // never leave a path with 0 points
+            if (!can_delete)
+                ImGui::BeginDisabled(true);
+            if (ImGui::MenuItem("Delete Point") && can_delete)
+            {
+                it->second.path_.RemovePoint(trajectory_context_point_index_);
+                it->second.SyncSpeedProfileEndpoints();  // removing a point changes the path's total length
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(trajectory_context_entity_name_);
+                if (trajectory_point_selected_ && trajectory_selected_entity_name_ == trajectory_context_entity_name_ &&
+                    trajectory_selected_point_index_ == trajectory_context_point_index_)
+                {
+                    trajectory_point_selected_       = false;
+                    trajectory_selected_point_index_ = -1;
+                    trajectory_selected_entity_name_.clear();
+                }
+            }
+            if (!can_delete)
+                ImGui::EndDisabled();
+        }
+        else
+        {
+            ImGui::TextDisabled("Point no longer exists");
+        }
+        ImGui::EndPopup();
+    }
+
+    // Right-click Insert Point, for a click near an existing path but not on a point (Trajectory_Editing.md
+    // 6.3-style path editing, extended to existing paths rather than only the initial pick session).
+    if (trajectory_insert_context_menu_to_open_)
+    {
+        trajectory_insert_context_menu_to_open_ = false;
+        ImGui::OpenPopup("Trajectory Insert Context Menu");
+    }
+    if (ImGui::BeginPopup("Trajectory Insert Context Menu"))
+    {
+        if (ImGui::MenuItem("Insert Point"))
+        {
+            auto it = data_model_.entity_trajectories_.find(trajectory_insert_context_entity_name_);
+            if (it != data_model_.entity_trajectories_.end())
+            {
+                EntityPose pose;
+                pose.x = trajectory_insert_context_x_;
+                pose.y = trajectory_insert_context_y_;
+                pose.z = trajectory_insert_context_z_;
+                pose.h = 0.0;
+                pose.SyncFromWorld(/*align_to_lane=*/true);
+                pose.SyncFromLane();  // snap x/y/z onto the matched lane, same as CommitTrajectoryPickingPoint()
+
+                it->second.path_.InsertPoint(trajectory_insert_context_s_, pose);
+                it->second.SyncSpeedProfileEndpoints();  // inserting a point changes the path's total length
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(trajectory_insert_context_entity_name_);
+            }
+        }
+        ImGui::EndPopup();
+    }
 }
 
 void StudioGui::HandleAddVehicleDialog()
@@ -1742,6 +1812,85 @@ void StudioGui::EndTrajectoryPointDrag()
     trajectory_point_drag_active_ = false;
     trajectory_drag_point_index_  = -1;
     trajectory_drag_entity_name_.clear();
+}
+
+bool StudioGui::HandleTrajectoryPointRightClick()
+{
+    if (data_model_.entity_trajectories_.empty())
+        return false;
+
+    UpdateMousePositionFromWorld();
+
+    const double kPointHitRadius = 2.0;  // meters; matches HandleTrajectoryPointClick()'s left-click radius
+    const double kPathHitRadius  = 3.0;  // a bit more forgiving since the path line itself is thin
+
+    // On/near an existing control point takes priority over "near the path in general": Delete Point.
+    std::string best_entity;
+    int         best_index    = -1;
+    double      best_dist_sqr = kPointHitRadius * kPointHitRadius;
+
+    for (auto& entry : data_model_.entity_trajectories_)
+    {
+        int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
+        if (index < 0)
+            continue;
+
+        const EntityPose& p  = entry.second.path_.points_[static_cast<size_t>(index)];
+        double            dx = p.x - hud_mouse_world_x_;
+        double            dy = p.y - hud_mouse_world_y_;
+        double            d2 = dx * dx + dy * dy;
+        if (d2 < best_dist_sqr)
+        {
+            best_dist_sqr = d2;
+            best_entity   = entry.first;
+            best_index    = index;
+        }
+    }
+
+    if (best_index >= 0)
+    {
+        trajectory_context_entity_name_        = best_entity;
+        trajectory_context_point_index_        = best_index;
+        trajectory_point_context_menu_to_open_ = true;
+        return true;
+    }
+
+    // Otherwise: close enough to an existing path (its control-point polyline) to offer inserting a new point
+    // there? Checked across all entities, closest one wins.
+    std::string insert_entity;
+    double      insert_s = 0.0, insert_x = 0.0, insert_y = 0.0, insert_z = 0.0;
+    double      insert_best_dist_sqr = kPathHitRadius * kPathHitRadius;
+    bool        found_insert         = false;
+
+    for (auto& entry : data_model_.entity_trajectories_)
+    {
+        double s = 0.0, x = 0.0, y = 0.0, z = 0.0, dist_sqr = 0.0;
+        if (!entry.second.path_.FindNearestPositionOnPath(hud_mouse_world_x_, hud_mouse_world_y_, &s, &x, &y, &z, &dist_sqr))
+            continue;
+        if (dist_sqr < insert_best_dist_sqr)
+        {
+            insert_best_dist_sqr = dist_sqr;
+            insert_entity        = entry.first;
+            insert_s             = s;
+            insert_x             = x;
+            insert_y             = y;
+            insert_z             = z;
+            found_insert         = true;
+        }
+    }
+
+    if (found_insert)
+    {
+        trajectory_insert_context_entity_name_  = insert_entity;
+        trajectory_insert_context_s_            = insert_s;
+        trajectory_insert_context_x_            = insert_x;
+        trajectory_insert_context_y_            = insert_y;
+        trajectory_insert_context_z_            = insert_z;
+        trajectory_insert_context_menu_to_open_ = true;
+        return true;
+    }
+
+    return false;
 }
 
 void StudioGui::RenderTrajectoriesTab()
@@ -2856,11 +3005,16 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             {
                 if (right_click_candidate_ && data_model_.mode_ == StudioMode::COMPOSER && !heading_operation_active_ && !move_operation_active_)
                 {
-                    auto* pos_info = PickPosition();
-                    if (pos_info)
-                        move_context_menu_to_open_ = true;
-                    else
-                        add_vehicle_context_menu_to_open_ = true;
+                    // Trajectory path points take priority over xosc entity picking (Trajectory_Editing.md
+                    // 7.4/8.2): only fall through to Move/Add Vehicle if the click wasn't on/near a path.
+                    if (!HandleTrajectoryPointRightClick())
+                    {
+                        auto* pos_info = PickPosition();
+                        if (pos_info)
+                            move_context_menu_to_open_ = true;
+                        else
+                            add_vehicle_context_menu_to_open_ = true;
+                    }
                 }
                 right_click_candidate_ = false;
             }

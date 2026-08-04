@@ -2387,6 +2387,56 @@ int EntityPath::FindNearestPointIndex(double x, double y) const
     return best_index;
 }
 
+bool EntityPath::FindNearestPositionOnPath(double x, double y, double* out_s, double* out_x, double* out_y, double* out_z, double* out_dist_sqr) const
+{
+    if (points_.size() < 2)
+        return false;
+
+    double best_dist_sqr = std::numeric_limits<double>::max();
+    double best_s = 0.0, best_x = 0.0, best_y = 0.0, best_z = 0.0;
+    double cumulative = 0.0;
+
+    for (size_t i = 0; i + 1 < points_.size(); i++)
+    {
+        const EntityPose& a = points_[i];
+        const EntityPose& b = points_[i + 1];
+
+        double abx         = b.x - a.x;
+        double aby         = b.y - a.y;
+        double seg_len_sqr = abx * abx + aby * aby;
+        double t           = 0.0;
+        if (seg_len_sqr > 1e-9)
+        {
+            t = ((x - a.x) * abx + (y - a.y) * aby) / seg_len_sqr;
+            t = std::min(1.0, std::max(0.0, t));
+        }
+
+        double px       = a.x + t * abx;
+        double py       = a.y + t * aby;
+        double dx       = px - x;
+        double dy       = py - y;
+        double dist_sqr = dx * dx + dy * dy;
+
+        double seg_len = Distance3D(a, b);  // matches InsertPoint()'s own cumulative-distance metric below
+        if (dist_sqr < best_dist_sqr)
+        {
+            best_dist_sqr = dist_sqr;
+            best_s        = cumulative + t * seg_len;
+            best_x        = px;
+            best_y        = py;
+            best_z        = a.z + t * (b.z - a.z);
+        }
+        cumulative += seg_len;
+    }
+
+    *out_s        = best_s;
+    *out_x        = best_x;
+    *out_y        = best_y;
+    *out_z        = best_z;
+    *out_dist_sqr = best_dist_sqr;
+    return true;
+}
+
 int EntityPath::InsertPoint(double s, const EntityPose& pose)
 {
     // Order the new point using the cumulative polyline distance between the existing control points - a

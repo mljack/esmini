@@ -133,7 +133,12 @@ void TopViewManipulator::getUsage(osg::ApplicationUsage& usage) const
 
 bool TopViewManipulator::handle(const GUIEventAdapter& ea, GUIActionAdapter& us)
 {
-    if (ea.getEventType() & (GUIEventAdapter::MOVE | GUIEventAdapter::PUSH | GUIEventAdapter::RELEASE))
+    // Also refresh on DRAG (mouse moved with a button held): StudioGui's trajectory-point/entity dragging
+    // reads getMousePos() every frame via StudioViewer::GetMousePosition() to compute how far the mouse has
+    // moved since a drag started. Without DRAG here, mousePos_ was frozen at whatever it was on the last
+    // PUSH/RELEASE/MOVE for the entire duration of a left-button drag, making the computed delta always zero
+    // and the dragged point appear completely stuck.
+    if (ea.getEventType() & (GUIEventAdapter::MOVE | GUIEventAdapter::DRAG | GUIEventAdapter::PUSH | GUIEventAdapter::RELEASE))
     {
         double tan      = std::tan(M_PI / 360.0);
         double camera_z = cameraPos_[2] - cameraTargetPos_[2];

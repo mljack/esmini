@@ -107,6 +107,13 @@ public:
     // Returns -1 if points_ is empty.
     int FindNearestPointIndex(double x, double y) const;
 
+    // Project (x, y) onto the closest point of the control-point polyline (the same straight-line segments
+    // between consecutive points_ that InsertPoint()'s own arc-length approximation uses, not the dense
+    // interpolated curve), used to offer "Insert Point" at a sensible spot near an existing path. Returns
+    // false if points_ has fewer than 2 points (nothing to project onto). out_dist_sqr is the squared XY
+    // distance from (x, y) to the projected point, letting the caller apply its own proximity threshold.
+    bool FindNearestPositionOnPath(double x, double y, double* out_s, double* out_x, double* out_y, double* out_z, double* out_dist_sqr) const;
+
     // Insert a new control point so that points_ stays ordered by (approximate, polyline-based) arc length.
     // Returns the index the point was inserted at.
     int InsertPoint(double s, const EntityPose& pose);
