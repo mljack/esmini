@@ -158,6 +158,12 @@ private:
     void Undo();
     void Redo();
 
+    // Trajectory-specific Undo/Redo helpers (Trajectory_Editing.md section 11): pack/unpack this StudioGui's
+    // own path/speed-profile point selection state into the opaque TrajectorySelectionSnapshot that
+    // StudioDataModel stores alongside each trajectory undo/redo entry.
+    TrajectorySelectionSnapshot CaptureTrajectorySelectionSnapshot() const;
+    void                        ApplyTrajectorySelectionSnapshot(const TrajectorySelectionSnapshot& sel);
+
     void TryLoadOpenDriveFromScenario();
 
     double time_;

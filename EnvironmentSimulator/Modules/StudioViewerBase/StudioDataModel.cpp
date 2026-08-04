@@ -1192,6 +1192,7 @@ void StudioDataModel::PushUndoState()
     if (!undo_diff.empty())
     {
         undo_stack_.push_back(undo_diff);
+        undo_seq_stack_.push_back(++edit_sequence_counter_);
 
         // size_t count = 0;
         // for(auto& chunk : undo_diff)
@@ -1202,10 +1203,12 @@ void StudioDataModel::PushUndoState()
         if (undo_stack_.size() > MAX_UNDO_STACK_SIZE)
         {
             undo_stack_.pop_front();
+            undo_seq_stack_.pop_front();
         }
 
         // Clear redo stack when a new action is performed
         redo_stack_.clear();
+        redo_seq_stack_.clear();
 
         // Update current snapshot
         current_snapshot_ = new_state;
@@ -1216,6 +1219,8 @@ void StudioDataModel::ClearUndoRedoStacks()
 {
     undo_stack_.clear();
     redo_stack_.clear();
+    undo_seq_stack_.clear();
+    redo_seq_stack_.clear();
     current_snapshot_.clear();
 }
 
@@ -1227,6 +1232,7 @@ void StudioDataModel::Undo()
     // Get the undo patch (New -> Old)
     std::vector<DiffChunk> undo_diff = undo_stack_.back();
     undo_stack_.pop_back();
+    undo_seq_stack_.pop_back();
 
     // We need to compute the redo patch (Old -> New) before applying undo
     // Current state is New. We want to go to Old.
@@ -1240,6 +1246,7 @@ void StudioDataModel::Undo()
     // Compute Redo patch: Old -> New
     std::vector<DiffChunk> redo_diff = ComputeDiff(old_state, current_snapshot_);
     redo_stack_.push_back(redo_diff);
+    redo_seq_stack_.push_back(++undo_sequence_counter_);
 
     // Apply undo
     current_snapshot_ = old_state;
@@ -1265,6 +1272,7 @@ void StudioDataModel::Redo()
     // Get redo patch (Old -> New)
     std::vector<DiffChunk> redo_diff = redo_stack_.back();
     redo_stack_.pop_back();
+    redo_seq_stack_.pop_back();
 
     // We need to compute undo patch (New -> Old) for the undo stack
     // Current is Old. Target is New.
@@ -1275,6 +1283,7 @@ void StudioDataModel::Redo()
     // Compute Undo patch: New -> Old
     std::vector<DiffChunk> undo_diff = ComputeDiff(new_state, current_snapshot_);
     undo_stack_.push_back(undo_diff);
+    undo_seq_stack_.push_back(++edit_sequence_counter_);
 
     // Apply redo
     current_snapshot_ = new_state;
@@ -1290,6 +1299,81 @@ void StudioDataModel::Redo()
 
     if (!invalid_nodes_.empty() || !invalid_attrs_.empty())
         ValidateScenario();
+}
+
+void StudioDataModel::PushTrajectoryUndoState(const TrajectorySelectionSnapshot& selection_after_edit)
+{
+    std::string new_data = TrajectoriesToJsonString();
+
+    // If this is the first state (initial load / first edit this session), just initialize the baseline.
+    if (current_trajectory_entry_.data_json.empty())
+    {
+        current_trajectory_entry_ = {new_data, selection_after_edit};
+        return;
+    }
+
+    // No actual data change (e.g. a click that only changed selection, not any point) - don't spend an undo
+    // slot on it.
+    if (new_data == current_trajectory_entry_.data_json)
+        return;
+
+    trajectory_undo_stack_.push_back(current_trajectory_entry_);
+    trajectory_undo_seq_stack_.push_back(++edit_sequence_counter_);
+    if (trajectory_undo_stack_.size() > MAX_TRAJECTORY_UNDO_STACK_SIZE)
+    {
+        trajectory_undo_stack_.pop_front();
+        trajectory_undo_seq_stack_.pop_front();
+    }
+
+    trajectory_redo_stack_.clear();
+    trajectory_redo_seq_stack_.clear();
+    current_trajectory_entry_ = {new_data, selection_after_edit};
+    trajectories_modified_    = true;
+}
+
+TrajectorySelectionSnapshot StudioDataModel::UndoTrajectories()
+{
+    if (trajectory_undo_stack_.empty())
+        return current_trajectory_entry_.selection;
+
+    TrajectoryUndoEntry old_entry = trajectory_undo_stack_.back();
+    trajectory_undo_stack_.pop_back();
+    trajectory_undo_seq_stack_.pop_back();
+
+    trajectory_redo_stack_.push_back(current_trajectory_entry_);
+    trajectory_redo_seq_stack_.push_back(++undo_sequence_counter_);
+
+    current_trajectory_entry_ = old_entry;
+    TrajectoriesFromJsonString(old_entry.data_json);
+    trajectories_modified_ = true;
+    return old_entry.selection;
+}
+
+TrajectorySelectionSnapshot StudioDataModel::RedoTrajectories()
+{
+    if (trajectory_redo_stack_.empty())
+        return current_trajectory_entry_.selection;
+
+    TrajectoryUndoEntry new_entry = trajectory_redo_stack_.back();
+    trajectory_redo_stack_.pop_back();
+    trajectory_redo_seq_stack_.pop_back();
+
+    trajectory_undo_stack_.push_back(current_trajectory_entry_);
+    trajectory_undo_seq_stack_.push_back(++edit_sequence_counter_);
+
+    current_trajectory_entry_ = new_entry;
+    TrajectoriesFromJsonString(new_entry.data_json);
+    trajectories_modified_ = true;
+    return new_entry.selection;
+}
+
+void StudioDataModel::ClearTrajectoryUndoRedoStacks()
+{
+    trajectory_undo_stack_.clear();
+    trajectory_redo_stack_.clear();
+    trajectory_undo_seq_stack_.clear();
+    trajectory_redo_seq_stack_.clear();
+    current_trajectory_entry_ = TrajectoryUndoEntry();
 }
 
 void StudioDataModel::ValidateScenario()
@@ -2738,6 +2822,22 @@ void StudioDataModel::RemoveEntityTrajectory(const std::string& entity_name)
 
 bool StudioDataModel::SaveTrajJson(const std::string& path)
 {
+    std::ofstream file(path);
+    if (!file.is_open())
+    {
+        LOG("Failed to open [%s] for writing trajectories", path.c_str());
+        return false;
+    }
+    file << TrajectoriesToJsonString();
+    file.close();
+
+    trajectories_modified_ = false;
+    LOG("Trajectories saved: [%s]", path.c_str());
+    return true;
+}
+
+std::string StudioDataModel::TrajectoriesToJsonString() const
+{
     nlohmann::json root;
     root["version"]     = 1;
     root["source_xosc"] = FileNameOf(xosc_path_);
@@ -2786,38 +2886,23 @@ bool StudioDataModel::SaveTrajJson(const std::string& path)
     }
     root["entities"] = entities_json;
 
-    std::ofstream file(path);
-    if (!file.is_open())
-    {
-        LOG("Failed to open [%s] for writing trajectories", path.c_str());
-        return false;
-    }
-    file << root.dump(2);
-    file.close();
-
-    trajectories_modified_ = false;
-    LOG("Trajectories saved: [%s]", path.c_str());
-    return true;
+    return root.dump(2);
 }
 
-bool StudioDataModel::LoadTrajJson(const std::string& path)
+bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
 {
-    std::ifstream file(path);
-    if (!file.is_open())
-        return false;
-
     nlohmann::json root;
     try
     {
-        file >> root;
+        root = nlohmann::json::parse(json_text);
     }
     catch (const std::exception& e)
     {
-        LOG("Failed to parse trajectory file [%s]: %s", path.c_str(), e.what());
+        LOG("Failed to parse trajectories JSON: %s", e.what());
         return false;
     }
 
-    entity_trajectories_.clear();
+    std::map<std::string, EntityTrajectory> new_trajectories;
 
     if (root.contains("entities") && root["entities"].is_object())
     {
@@ -2860,12 +2945,30 @@ bool StudioDataModel::LoadTrajJson(const std::string& path)
                 }
             }
 
-            entity_trajectories_[traj.entity_name_] = std::move(traj);
+            new_trajectories[traj.entity_name_] = std::move(traj);
         }
     }
+
+    entity_trajectories_ = std::move(new_trajectories);
+    return true;
+}
+
+bool StudioDataModel::LoadTrajJson(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        return false;
+
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    file.close();
+
+    if (!TrajectoriesFromJsonString(buffer.str()))
+        return false;
 
     traj_json_path_        = path;
     trajectories_modified_ = false;
     LOG("Trajectories loaded: [%s] (%d entities)", path.c_str(), static_cast<int>(entity_trajectories_.size()));
     return true;
 }
+

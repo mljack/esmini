@@ -1377,6 +1377,7 @@ void StudioGui::HandleViewportContextMenu()
                     trajectory_selected_point_index_ = -1;
                     trajectory_selected_entity_name_.clear();
                 }
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
             if (!can_delete)
                 ImGui::EndDisabled();
@@ -1414,6 +1415,7 @@ void StudioGui::HandleViewportContextMenu()
                 it->second.SyncSpeedProfileEndpoints();  // inserting a point changes the path's total length
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(trajectory_insert_context_entity_name_);
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
         }
         ImGui::EndPopup();
@@ -1691,6 +1693,11 @@ void StudioGui::FinishTrajectoryPicking()
 
     trajectory_picking_active_ = false;
     trajectory_renderer_.ClearPickingPreview();
+
+    // Whole Add Trajectory session = one undo step (Trajectory_Editing.md section 11.5); the Esc-based
+    // per-point undo during picking (CancelTrajectoryPickingPoint()) is a separate, local-only mechanism that
+    // never touches the global trajectory undo stack.
+    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
 void StudioGui::CancelTrajectoryPickingPoint()
@@ -1812,6 +1819,10 @@ void StudioGui::EndTrajectoryPointDrag()
     trajectory_point_drag_active_ = false;
     trajectory_drag_point_index_  = -1;
     trajectory_drag_entity_name_.clear();
+
+    // Commit one undo step for the whole drag gesture (Trajectory_Editing.md section 11.5); PushTrajectoryUndoState()
+    // itself is a no-op if the point never actually moved (e.g. a click-and-release with zero movement).
+    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
 bool StudioGui::HandleTrajectoryPointRightClick()
@@ -2137,6 +2148,9 @@ void StudioGui::RenderTrajectoriesTab()
                 // Skip re-sorting/anchor-sync while a Ctrl-drag is actively moving this point's s, so the
                 // point's index stays stable across frames for the drag above; it's finalized on release
                 // (the frame speed_point_drag_active_ turns false, which happens before this check runs).
+                // This is also precisely the right condition under which to commit an undo step (Trajectory_
+                // Editing.md section 11.5): either a discrete Insert/Delete Point action, or the exact frame a
+                // drag gesture ends - never a mid-drag intermediate frame.
                 if (profile_changed && !(speed_point_drag_active_ && this_is_drag_target))
                 {
                     // An Insert Point (or an out-of-order Ctrl-drag) could leave points_ unsorted;
@@ -2145,6 +2159,7 @@ void StudioGui::RenderTrajectoriesTab()
                              traj.speed_profile_.points_.end(),
                              [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
                     traj.SyncSpeedProfileEndpoints();
+                    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
                 }
                 if (profile_changed)
                 {
@@ -2156,7 +2171,8 @@ void StudioGui::RenderTrajectoriesTab()
             // Precise numeric editing table, and the only way to delete a speed profile point. The first and
             // last rows are the fixed start/end anchors: their s is read-only and they cannot be deleted, so
             // there are always at least 2 points spanning [0, path length].
-            int point_to_delete = -1;
+            int  point_to_delete     = -1;
+            bool commit_numeric_edit = false;  // set when an InputFloat below finishes an edit (see IsItemDeactivatedAfterEdit)
             if (ImGui::BeginTable("##speed_profile_table", 3, ImGuiTableFlags_SizingStretchProp))
             {
                 ImGui::TableSetupColumn("s (m)");
@@ -2184,11 +2200,18 @@ void StudioGui::RenderTrajectoriesTab()
                         ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f");
                         ImGui::EndDisabled();
                     }
-                    else if (ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f"))
+                    else
                     {
-                        traj.speed_profile_.points_[i].s   = std::min(static_cast<float>(s_axis_max), std::max(0.0f, s_value));
-                        data_model_.trajectories_modified_ = true;
-                        trajectory_renderer_.MarkDirty(name);
+                        if (ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f"))
+                        {
+                            traj.speed_profile_.points_[i].s   = std::min(static_cast<float>(s_axis_max), std::max(0.0f, s_value));
+                            data_model_.trajectories_modified_ = true;
+                            trajectory_renderer_.MarkDirty(name);
+                        }
+                        // Commit one undo step per finished edit (Trajectory_Editing.md 11.5), not per keystroke;
+                        // the actual push is deferred to after the re-sort below so it captures the final state.
+                        if (ImGui::IsItemDeactivatedAfterEdit())
+                            commit_numeric_edit = true;
                     }
 
                     ImGui::TableSetColumnIndex(1);
@@ -2200,6 +2223,8 @@ void StudioGui::RenderTrajectoriesTab()
                         data_model_.trajectories_modified_    = true;
                         trajectory_renderer_.MarkDirty(name);
                     }
+                    if (ImGui::IsItemDeactivatedAfterEdit())
+                        commit_numeric_edit = true;
 
                     ImGui::TableSetColumnIndex(2);
                     if (is_anchor)
@@ -2236,6 +2261,7 @@ void StudioGui::RenderTrajectoriesTab()
                     speed_drag_point_index_  = -1;
                     speed_drag_entity_name_.clear();
                 }
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
             else
             {
@@ -2244,6 +2270,8 @@ void StudioGui::RenderTrajectoriesTab()
                          traj.speed_profile_.points_.end(),
                          [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
                 traj.SyncSpeedProfileEndpoints();
+                if (commit_numeric_edit)
+                    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
 
             if (ImGui::Button("Add Point"))
@@ -2268,6 +2296,7 @@ void StudioGui::RenderTrajectoriesTab()
                     speed_selected_point_index_ = -1;
                     speed_selected_entity_name_.clear();
                 }
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
         }
         ImGui::PopID();
@@ -2303,6 +2332,10 @@ void StudioGui::RenderTrajectoriesTab()
             speed_drag_point_index_  = -1;
             speed_drag_entity_name_.clear();
         }
+
+        // Selection referencing the deleted entity has already been cleared above, so the captured snapshot
+        // is guaranteed consistent with the post-delete state (Trajectory_Editing.md section 11.5).
+        data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
     }
 }
 
@@ -2435,6 +2468,10 @@ void StudioGui::RenderMenuBar()
                         // entities, so this is purely "load whatever was saved before", no generation/sync.
                         data_model_.traj_json_path_ = DeriveTrajJsonPath(result[0]);
                         data_model_.LoadTrajJson(data_model_.traj_json_path_);
+                        // Fresh file: don't allow undoing back into whatever was loaded before (section 11.5),
+                        // and seed the new baseline so the first real edit after this can still be undone.
+                        data_model_.ClearTrajectoryUndoRedoStacks();
+                        data_model_.PushTrajectoryUndoState(TrajectorySelectionSnapshot());
                     }
                 }
             }
@@ -2469,6 +2506,10 @@ void StudioGui::RenderMenuBar()
                         speed_point_drag_active_          = false;
                         speed_drag_point_index_           = -1;
                         speed_drag_entity_name_.clear();
+                        // Don't allow undoing back into whatever was loaded before this (section 11.5), and
+                        // seed the new baseline so the first real edit after this load can still be undone.
+                        data_model_.ClearTrajectoryUndoRedoStacks();
+                        data_model_.PushTrajectoryUndoState(TrajectorySelectionSnapshot());
                     }
                     else
                     {
@@ -2538,11 +2579,11 @@ void StudioGui::RenderMenuBar()
 
         if (ImGui::BeginMenu("Edit"))
         {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, data_model_.CanUndo() && in_composer_mode))
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, (data_model_.CanUndo() || data_model_.CanUndoTrajectories()) && in_composer_mode))
             {
                 Undo();
             }
-            if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, data_model_.CanRedo() && in_composer_mode))
+            if (ImGui::MenuItem("Redo", "Ctrl+Shift+Z", false, (data_model_.CanRedo() || data_model_.CanRedoTrajectories()) && in_composer_mode))
             {
                 Redo();
             }
@@ -2571,11 +2612,61 @@ void StudioGui::RenderMenuBar()
     ImGui::EndMainMenuBar();
 }
 
+TrajectorySelectionSnapshot StudioGui::CaptureTrajectorySelectionSnapshot() const
+{
+    TrajectorySelectionSnapshot sel;
+    sel.path_point_selected  = trajectory_point_selected_;
+    sel.path_point_entity    = trajectory_selected_entity_name_;
+    sel.path_point_index     = trajectory_selected_point_index_;
+    sel.speed_point_selected = speed_point_selected_;
+    sel.speed_point_entity   = speed_selected_entity_name_;
+    sel.speed_point_index    = speed_selected_point_index_;
+    return sel;
+}
+
+void StudioGui::ApplyTrajectorySelectionSnapshot(const TrajectorySelectionSnapshot& sel)
+{
+    trajectory_point_selected_       = sel.path_point_selected;
+    trajectory_selected_entity_name_ = sel.path_point_entity;
+    trajectory_selected_point_index_ = sel.path_point_index;
+    speed_point_selected_            = sel.speed_point_selected;
+    speed_selected_entity_name_      = sel.speed_point_entity;
+    speed_selected_point_index_      = sel.speed_point_index;
+
+    // Defensive: end any drag that might still (in theory) be active - Undo()/Redo() already refuse to run
+    // while a gesture is in progress, this just guards against a dangling drag-start reference after the
+    // underlying data changed out from under it.
+    trajectory_point_drag_active_ = false;
+    speed_point_drag_active_      = false;
+
+    // ImGui's InputFloat caches its own edit buffer while actively focused and won't re-read the float* every
+    // frame; if undo/redo just changed the value behind a currently-focused numeric field, force it to let go
+    // so it re-syncs from the (now updated) underlying data next frame instead of briefly showing a stale value.
+    ImGui::ClearActiveID();
+}
+
 void StudioGui::Undo()
 {
     if (data_model_.mode_ != StudioMode::COMPOSER)
         return;
-    data_model_.Undo();
+    // Ignore Ctrl+Z while a trajectory gesture is in progress, rather than trying to reconcile an undo with a
+    // not-yet-committed drag/picking session (Trajectory_Editing.md section 11.4).
+    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_)
+        return;
+
+    bool xml_is_newer = data_model_.CanUndo() &&
+                        (!data_model_.CanUndoTrajectories() || data_model_.LastXmlUndoSeq() > data_model_.LastTrajectoryUndoSeq());
+    if (xml_is_newer)
+    {
+        data_model_.Undo();
+    }
+    else if (data_model_.CanUndoTrajectories())
+    {
+        ApplyTrajectorySelectionSnapshot(data_model_.UndoTrajectories());
+        trajectory_renderer_.SetSelectedPoint(trajectory_point_selected_ ? trajectory_selected_entity_name_ : std::string(),
+                                              trajectory_point_selected_ ? trajectory_selected_point_index_ : -1);
+    }
+
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
 }
@@ -2584,7 +2675,22 @@ void StudioGui::Redo()
 {
     if (data_model_.mode_ != StudioMode::COMPOSER)
         return;
-    data_model_.Redo();
+    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_)
+        return;
+
+    bool xml_is_newer = data_model_.CanRedo() &&
+                        (!data_model_.CanRedoTrajectories() || data_model_.LastXmlRedoSeq() > data_model_.LastTrajectoryRedoSeq());
+    if (xml_is_newer)
+    {
+        data_model_.Redo();
+    }
+    else if (data_model_.CanRedoTrajectories())
+    {
+        ApplyTrajectorySelectionSnapshot(data_model_.RedoTrajectories());
+        trajectory_renderer_.SetSelectedPoint(trajectory_point_selected_ ? trajectory_selected_entity_name_ : std::string(),
+                                              trajectory_point_selected_ ? trajectory_selected_point_index_ : -1);
+    }
+
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
 }
@@ -2916,11 +3022,12 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             // Legacy Ctrl shortcuts handling (can be removed if ImGui handles them, but keeping for safety)
             if (ea.getEventType() == osgGA::GUIEventAdapter::KEYDOWN && (mod & osgGA::GUIEventAdapter::MODKEY_CTRL))
             {
-                if (c == 'z' && (mod & osgGA::GUIEventAdapter::MODKEY_SHIFT) && data_model_.CanRedo())  // Ctrl + SHIFT + Z
+                if (c == 'z' && (mod & osgGA::GUIEventAdapter::MODKEY_SHIFT) &&
+                    (data_model_.CanRedo() || data_model_.CanRedoTrajectories()))  // Ctrl + SHIFT + Z
                 {
                     Redo();
                 }
-                else if (c == 'z' && data_model_.CanUndo())  // Ctrl + Z
+                else if (c == 'z' && (data_model_.CanUndo() || data_model_.CanUndoTrajectories()))  // Ctrl + Z
                 {
                     Undo();
                 }

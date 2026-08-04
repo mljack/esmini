@@ -206,6 +206,20 @@ public:
 // Derive the ".traj.json" sidecar path from a ".xosc" path, e.g. "scenario.xosc" -> "scenario.traj.json".
 std::string DeriveTrajJsonPath(const std::string& xosc_path);
 
+// An opaque (from StudioDataModel's point of view) snapshot of which trajectory path/speed-profile point is
+// currently selected in the UI (Trajectory_Editing.md section 11.3). StudioDataModel only stores/returns these
+// alongside each undo/redo entry - it never reads or interprets them; StudioGui is the one that knows what
+// "selected" means and packs/unpacks its own trajectory_point_selected_ etc. members into/from this struct.
+struct TrajectorySelectionSnapshot
+{
+    bool        path_point_selected  = false;
+    std::string path_point_entity;
+    int         path_point_index     = -1;
+    bool        speed_point_selected = false;
+    std::string speed_point_entity;
+    int         speed_point_index    = -1;
+};
+
 class StudioDataModel
 {
 public:
@@ -305,6 +319,43 @@ public:
     }
     void ClearUndoRedoStacks();
 
+    // Independent undo/redo for entity_trajectories_ (Trajectory_Editing.md section 11): full-JSON-snapshot
+    // based rather than the xml_doc_ diff mechanism above, since the trajectory data volume is small. Routed
+    // to/from the same Ctrl+Z/Ctrl+Shift+Z shortcuts as the xml Undo()/Redo() via the Last*Seq() accessors
+    // below (see StudioGui::Undo()/Redo()), so pressing Ctrl+Z always undoes whichever kind of edit happened
+    // most recently, whether it touched xml_doc_ or entity_trajectories_.
+    void                        PushTrajectoryUndoState(const TrajectorySelectionSnapshot& selection_after_edit);
+    TrajectorySelectionSnapshot UndoTrajectories();
+    TrajectorySelectionSnapshot RedoTrajectories();
+    bool                        CanUndoTrajectories() const
+    {
+        return !trajectory_undo_stack_.empty();
+    }
+    bool CanRedoTrajectories() const
+    {
+        return !trajectory_redo_stack_.empty();
+    }
+    void ClearTrajectoryUndoRedoStacks();
+
+    // Sequence numbers of the most recent push on each stack, used purely to decide which of the two
+    // independent undo systems is "more recent" when routing Ctrl+Z/Ctrl+Shift+Z (0 if the stack is empty).
+    size_t LastXmlUndoSeq() const
+    {
+        return undo_seq_stack_.empty() ? 0 : undo_seq_stack_.back();
+    }
+    size_t LastXmlRedoSeq() const
+    {
+        return redo_seq_stack_.empty() ? 0 : redo_seq_stack_.back();
+    }
+    size_t LastTrajectoryUndoSeq() const
+    {
+        return trajectory_undo_seq_stack_.empty() ? 0 : trajectory_undo_seq_stack_.back();
+    }
+    size_t LastTrajectoryRedoSeq() const
+    {
+        return trajectory_redo_seq_stack_.empty() ? 0 : trajectory_redo_seq_stack_.back();
+    }
+
     struct ValidationError
     {
         std::string         message;
@@ -381,6 +432,42 @@ private:
 
     // Current snapshot text to compute diffs against
     std::string current_snapshot_;
+
+    // Parallel to undo_stack_/redo_stack_ (index-aligned), recording the shared sequence counter value at the
+    // moment each entry was pushed - used only to compare recency against the trajectory undo/redo stacks
+    // below when routing Ctrl+Z/Ctrl+Shift+Z (see Last*Seq() accessors and StudioGui::Undo()/Redo()).
+    std::deque<size_t> undo_seq_stack_;
+    std::deque<size_t> redo_seq_stack_;
+
+    // One entry = one full JSON snapshot of entity_trajectories_ plus the selection state that should be
+    // restored alongside it (Trajectory_Editing.md section 11.3). Kept as a plain JSON string (not a live
+    // nlohmann::json object) so this header does not need to include json.hpp.
+    struct TrajectoryUndoEntry
+    {
+        std::string                 data_json;  // TrajectoriesToJsonString()
+        TrajectorySelectionSnapshot selection;
+    };
+    std::deque<TrajectoryUndoEntry> trajectory_undo_stack_;
+    std::deque<TrajectoryUndoEntry> trajectory_redo_stack_;
+    TrajectoryUndoEntry              current_trajectory_entry_;
+
+    std::deque<size_t> trajectory_undo_seq_stack_;
+    std::deque<size_t> trajectory_redo_seq_stack_;
+
+    static const size_t MAX_TRAJECTORY_UNDO_STACK_SIZE = 50;
+
+    // Shared between the xml and trajectory undo systems so their stacks can be compared for recency:
+    // edit_sequence_counter_ is bumped on every successful Push*UndoState() (and every Redo, since redoing
+    // makes that state the most recent edit again); undo_sequence_counter_ is bumped on every Undo, so a
+    // subsequent Redo can tell which of the two systems' redo stacks was undone more recently.
+    size_t edit_sequence_counter_ = 0;
+    size_t undo_sequence_counter_ = 0;
+
+    // Internal (de)serialization helpers shared by SaveTrajJson/LoadTrajJson and the trajectory undo/redo
+    // functions above (Trajectory_Editing.md section 11.2) - kept as std::string (a JSON dump), not a raw
+    // nlohmann::json object, so that type does not need to appear in this header either.
+    std::string TrajectoriesToJsonString() const;
+    bool        TrajectoriesFromJsonString(const std::string& json_text);
 
     struct NodeStruct
     {
