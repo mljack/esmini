@@ -2761,6 +2761,315 @@ std::string DeriveTrajJsonPath(const std::string& xosc_path)
     return base + ".traj.json";
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Keyframe cascade solver (Trajectory_Editing_Enhancement.md section 4): P0 precheck -> P1 scale existing
+// nodes (no new points) -> P2a insert one midpoint -> P2b accel-limited trapezoid -> P4 clamp + residual.
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+// Finalized limits (Trajectory_Editing_Enhancement.md section 11): plain code constants for now.
+const double KF_V_MAX   = 30.0;  // m/s, hard speed ceiling (matches the speed profile chart's Y range)
+const double KF_V_MIN   = 0.1;   // m/s, same clamp EvaluateTimeAtS() applies to avoid divergent integrals
+const double KF_ACC_MAX = 3.0;   // m/s^2, acceleration limit (speed increasing along s)
+const double KF_DEC_MAX = 5.0;   // m/s^2, deceleration limit magnitude (speed decreasing along s)
+
+// Travel time across distance d with v(s) linear from v1 to v2: t = d * ln(v2/v1) / (v2 - v1).
+double LinearRampTime(double v1, double v2, double d)
+{
+    if (d <= 1e-9)
+        return 0.0;
+    v1 = std::max(v1, KF_V_MIN);
+    v2 = std::max(v2, KF_V_MIN);
+    if (std::fabs(v2 - v1) < 1e-9)
+        return d / v1;
+    return d * std::log(v2 / v1) / (v2 - v1);
+}
+
+// Minimal distance needed to ramp v1 -> v2 with v(s) linear in s under the direction-appropriate acceleration
+// limit. For linear-in-s speed, a(s) = v * dv/ds peaks at the fast end: |a|max = |slope| * max(v1, v2).
+double MinRampDistance(double v1, double v2)
+{
+    double dv = std::fabs(v2 - v1);
+    if (dv < 1e-9)
+        return 0.0;
+    double a_limit = (v2 > v1) ? KF_ACC_MAX : KF_DEC_MAX;
+    return dv * std::max(std::max(v1, v2), KF_V_MIN) / a_limit;
+}
+
+// Total travel time of the trapezoid/valley profile ramp(v_a->v_p) + plateau(v_p) + ramp(v_p->v_b) squeezed
+// into 'length'. Returns false when the two minimal ramps alone do not fit.
+bool TrapezoidTime(double v_a, double v_b, double length, double v_p, double* out_time, double* out_d1, double* out_d2)
+{
+    double d1 = MinRampDistance(v_a, v_p);
+    double d2 = MinRampDistance(v_p, v_b);
+    if (d1 + d2 > length + 1e-9)
+        return false;
+
+    double d_plateau = std::max(0.0, length - d1 - d2);
+    double t         = LinearRampTime(v_a, v_p, d1) + d_plateau / std::max(v_p, KF_V_MIN) + LinearRampTime(v_p, v_b, d2);
+    if (out_time)
+        *out_time = t;
+    if (out_d1)
+        *out_d1 = d1;
+    if (out_d2)
+        *out_d2 = d2;
+    return true;
+}
+
+// Check the acceleration limits on every profile piece that intersects (s_lo, s_hi) - i.e. only the pieces a
+// cascade step actually touched (finalized decision: no whole-table scan).
+bool SegmentAccelOk(const std::vector<SpeedProfilePoint>& pts, double s_lo, double s_hi)
+{
+    for (size_t i = 0; i + 1 < pts.size(); i++)
+    {
+        double s1 = pts[i].s, s2 = pts[i + 1].s;
+        if (s2 <= s_lo + 1e-9 || s1 >= s_hi - 1e-9)
+            continue;  // piece entirely outside the touched range
+
+        double ds = s2 - s1;
+        double v1 = pts[i].speed, v2 = pts[i + 1].speed;
+        if (ds < 1e-9)
+        {
+            if (std::fabs(v2 - v1) > 1e-6)
+                return false;  // vertical jump
+            continue;
+        }
+        double slope   = (v2 - v1) / ds;
+        double a_peak  = std::fabs(slope) * std::max(std::max(v1, v2), KF_V_MIN);
+        double a_limit = (v2 > v1) ? KF_ACC_MAX : KF_DEC_MAX;
+        if (a_peak > a_limit * 1.001 + 1e-9)
+            return false;
+    }
+    return true;
+}
+}  // namespace
+
+void EntityTrajectory::ResolveKeyframes()
+{
+    if (keyframes_.empty())
+        return;
+
+    SyncSpeedProfileEndpoints();
+
+    // Auto handling of later path geometry edits (finalized decision): clamp every keyframe's s into the new
+    // [0, L], then re-run the cascade chain from the start. World positions are derived from s at render time,
+    // so no re-projection is needed.
+    double total_length = path_.GetTotalLength();
+    for (auto& kf : keyframes_)
+        kf.s = std::min(total_length, std::max(0.0, kf.s));
+
+    std::sort(keyframes_.begin(), keyframes_.end(), [](const TrajectoryKeyframe& a, const TrajectoryKeyframe& b) { return a.t < b.t; });
+
+    double prev_t = 0.0;
+    double prev_s = 0.0;
+    for (auto& kf : keyframes_)
+    {
+        bool   feasible    = true;
+        double achieved_dt = SolveKeyframeSegment(prev_s, kf.s, kf.t - prev_t, &feasible);
+        kf.achieved_t      = prev_t + achieved_dt;
+        kf.feasible        = feasible && std::fabs(kf.achieved_t - kf.t) < 0.05;
+        prev_t             = kf.achieved_t;
+        prev_s             = kf.s;
+    }
+}
+
+double EntityTrajectory::SolveKeyframeSegment(double s_a, double s_b, double target_dt, bool* out_feasible)
+{
+    *out_feasible = true;
+
+    auto segment_time = [&]() { return speed_profile_.EvaluateTimeAtS(s_b) - speed_profile_.EvaluateTimeAtS(s_a); };
+
+    double length = s_b - s_a;
+    if (length <= 1e-6 || target_dt <= 1e-6)
+    {
+        // Zero-length segment or non-increasing time: nothing can be solved, keep the profile untouched.
+        *out_feasible = (length <= 1e-6 && target_dt <= 1e-6);
+        return segment_time();
+    }
+
+    double v_a = std::min(KF_V_MAX, std::max(0.0, speed_profile_.EvaluateSpeed(s_a)));
+    double v_b = std::min(KF_V_MAX, std::max(0.0, speed_profile_.EvaluateSpeed(s_b)));
+
+    // --- P0: reachable time window under the acceleration/speed limits (via the trapezoid evaluator). A
+    // plateau speed between the boundary speeds always needs less ramp distance than the direct ramp, so use
+    // the boundary midpoint as the bisection seed.
+    double v_seed    = 0.5 * (v_a + v_b);
+    double seed_time = 0.0;
+    if (!TrapezoidTime(v_a, v_b, length, v_seed, &seed_time, nullptr, nullptr))
+    {
+        // Boundary speeds too far apart for this short a segment: no in-segment profile can even connect
+        // them under the limits. Leave the profile untouched (P4 degenerate case).
+        *out_feasible = false;
+        return segment_time();
+    }
+
+    auto highest_feasible = [&](double from, double to) {  // from is feasible, probe towards to
+        double lo = from, hi = to, t_dummy;
+        if (TrapezoidTime(v_a, v_b, length, to, &t_dummy, nullptr, nullptr))
+            return to;
+        for (int i = 0; i < 40; i++)
+        {
+            double mid = 0.5 * (lo + hi);
+            if (TrapezoidTime(v_a, v_b, length, mid, &t_dummy, nullptr, nullptr))
+                lo = mid;
+            else
+                hi = mid;
+        }
+        return lo;
+    };
+
+    double v_hi = highest_feasible(v_seed, KF_V_MAX);
+    double v_lo = highest_feasible(v_seed, KF_V_MIN);
+
+    double t_min = 0.0, t_max = 0.0;
+    TrapezoidTime(v_a, v_b, length, v_hi, &t_min, nullptr, nullptr);
+    TrapezoidTime(v_a, v_b, length, v_lo, &t_max, nullptr, nullptr);
+
+    // P4 clamp decided up front: P1/P2 then solve for the clamped (= reachable) travel time.
+    double solve_dt = target_dt;
+    if (solve_dt < t_min)
+    {
+        solve_dt      = t_min;
+        *out_feasible = false;
+    }
+    else if (solve_dt > t_max)
+    {
+        solve_dt      = t_max;
+        *out_feasible = false;
+    }
+
+    std::vector<SpeedProfilePoint> snapshot = speed_profile_.points_;
+
+    // --- P1: uniformly scale the speeds of existing nodes inside the segment, no new points. v(0) is
+    // adjustable by decision, so the first segment (s_a == 0) includes the start anchor node.
+    {
+        std::vector<size_t> scaled;
+        double              max_speed = 0.0;
+        for (size_t i = 0; i < speed_profile_.points_.size(); i++)
+        {
+            double s        = speed_profile_.points_[i].s;
+            bool   in_range = (s_a <= 1e-9) ? (s <= s_b + 1e-9) : (s > s_a + 1e-9 && s <= s_b + 1e-9);
+            if (in_range)
+            {
+                scaled.push_back(i);
+                max_speed = std::max(max_speed, speed_profile_.points_[i].speed);
+            }
+        }
+
+        if (!scaled.empty() && max_speed > 1e-6)
+        {
+            double alpha_hi = KF_V_MAX / max_speed;
+            double alpha_lo = 0.01;
+
+            auto time_with_alpha = [&](double alpha) {
+                for (size_t idx : scaled)
+                    speed_profile_.points_[idx].speed = snapshot[idx].speed * alpha;
+                return segment_time();
+            };
+
+            bool bracket_ok = time_with_alpha(alpha_hi) <= solve_dt && time_with_alpha(alpha_lo) >= solve_dt;
+            if (bracket_ok)
+            {
+                double lo = alpha_lo, hi = alpha_hi;
+                for (int i = 0; i < 40; i++)
+                {
+                    double mid = 0.5 * (lo + hi);
+                    if (time_with_alpha(mid) > solve_dt)
+                        lo = mid;  // too slow, scale up
+                    else
+                        hi = mid;
+                }
+                double t_final = time_with_alpha(0.5 * (lo + hi));
+                if (std::fabs(t_final - solve_dt) < 1e-2 && SegmentAccelOk(speed_profile_.points_, s_a, s_b + 1e-6))
+                    return t_final;
+            }
+            speed_profile_.points_ = snapshot;  // P1 failed, roll back
+        }
+    }
+
+    // Anchor the segment boundaries so P2a/P2b edits cannot leak outside [s_a, s_b]. (Value-preserving nodes:
+    // the profile shape is unchanged by inserting them.)
+    auto ensure_node_at = [&](double s, double v) {
+        for (const auto& p : speed_profile_.points_)
+            if (std::fabs(p.s - s) < 1e-6)
+                return;
+        speed_profile_.InsertPoint(s, v);
+    };
+    ensure_node_at(s_a, v_a);
+    ensure_node_at(s_b, v_b);
+    std::vector<SpeedProfilePoint> anchored_snapshot = speed_profile_.points_;
+
+    // Interior nodes strictly inside (s_a, s_b)?
+    bool has_interior = false;
+    for (const auto& p : speed_profile_.points_)
+        if (p.s > s_a + 1e-6 && p.s < s_b - 1e-6)
+            has_interior = true;
+
+    // --- P2a: insert one free midpoint node (only when the segment interior was originally empty; adding one
+    // more degree of freedom on top of nodes P1 already failed to fit rarely helps - see the design doc).
+    if (!has_interior)
+    {
+        double s_m   = 0.5 * (s_a + s_b);
+        int    m_idx = speed_profile_.InsertPoint(s_m, v_seed);
+
+        auto time_with_vm = [&](double v_m) {
+            speed_profile_.points_[static_cast<size_t>(m_idx)].speed = v_m;
+            return segment_time();
+        };
+
+        if (time_with_vm(KF_V_MAX) <= solve_dt && time_with_vm(KF_V_MIN) >= solve_dt)
+        {
+            double lo = KF_V_MIN, hi = KF_V_MAX;
+            for (int i = 0; i < 40; i++)
+            {
+                double mid = 0.5 * (lo + hi);
+                if (time_with_vm(mid) > solve_dt)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            double t_final = time_with_vm(0.5 * (lo + hi));
+            if (std::fabs(t_final - solve_dt) < 1e-2 && SegmentAccelOk(speed_profile_.points_, s_a, s_b + 1e-6))
+                return t_final;
+        }
+        speed_profile_.points_ = anchored_snapshot;  // P2a failed, roll back to the anchored state
+    }
+
+    // --- P2b: replace the segment interior with the accel-limited trapezoid/valley profile (the only cascade
+    // level allowed to discard interior nodes - they were already proven unable to satisfy the constraint).
+    {
+        speed_profile_.points_.erase(std::remove_if(speed_profile_.points_.begin(),
+                                                    speed_profile_.points_.end(),
+                                                    [&](const SpeedProfilePoint& p) { return p.s > s_a + 1e-6 && p.s < s_b - 1e-6; }),
+                                     speed_profile_.points_.end());
+
+        // Solve the plateau speed for solve_dt within the feasible [v_lo, v_hi] range (time is monotone
+        // decreasing in the plateau speed).
+        double lo = v_lo, hi = v_hi;
+        for (int i = 0; i < 48; i++)
+        {
+            double mid    = 0.5 * (lo + hi);
+            double t_tent = 0.0;
+            if (!TrapezoidTime(v_a, v_b, length, mid, &t_tent, nullptr, nullptr) || t_tent < solve_dt)
+                hi = mid;
+            else
+                lo = mid;
+        }
+        double v_p = 0.5 * (lo + hi);
+        double t_p = 0.0, d1 = 0.0, d2 = 0.0;
+        TrapezoidTime(v_a, v_b, length, v_p, &t_p, &d1, &d2);
+
+        if (d1 > 1e-6)
+            speed_profile_.InsertPoint(s_a + d1, v_p);
+        if (d2 > 1e-6 && s_b - d2 > s_a + d1 + 1e-6)
+            speed_profile_.InsertPoint(s_b - d2, v_p);
+
+        return segment_time();
+    }
+}
+
+
 namespace
 {
 std::string PathInterpModeToString(EntityPath::InterpMode mode)
@@ -2839,7 +3148,7 @@ bool StudioDataModel::SaveTrajJson(const std::string& path)
 std::string StudioDataModel::TrajectoriesToJsonString() const
 {
     nlohmann::json root;
-    root["version"]     = 1;
+    root["version"]     = 2;
     root["source_xosc"] = FileNameOf(xosc_path_);
 
     nlohmann::json entities_json = nlohmann::json::object();
@@ -2881,6 +3190,21 @@ std::string StudioDataModel::TrajectoriesToJsonString() const
             {"interp_mode", SpeedInterpModeToString(traj.speed_profile_.interp_mode_)},
             {   "points",                                  speed_points_json}
         };
+
+        // Time keyframes (Trajectory_Editing_Enhancement.md, schema v2): only (t, s) is persisted; the world
+        // position is derived from the path at render time and achieved_t/feasible are recomputed on load.
+        if (!traj.keyframes_.empty())
+        {
+            nlohmann::json keyframes_json = nlohmann::json::array();
+            for (const auto& kf : traj.keyframes_)
+            {
+                nlohmann::json kf_json;
+                kf_json["t"] = RoundToDecimals(kf.t, 3);
+                kf_json["s"] = RoundToDecimals(kf.s, 3);
+                keyframes_json.push_back(kf_json);
+            }
+            entity_json["keyframes"] = keyframes_json;
+        }
 
         entities_json[entry.first] = entity_json;
     }
@@ -2943,6 +3267,20 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
                     sp.speed = point_json.value("speed", 0.0);
                     traj.speed_profile_.points_.push_back(sp);
                 }
+            }
+
+            // Optional v2 field; v1 files simply have no keyframes. The persisted profile already reflects the
+            // solved state, but achieved_t/feasible are volatile - recompute them so status displays are right.
+            if (entity_json.contains("keyframes") && entity_json["keyframes"].is_array())
+            {
+                for (const auto& kf_json : entity_json["keyframes"])
+                {
+                    TrajectoryKeyframe kf;
+                    kf.t = kf_json.value("t", 0.0);
+                    kf.s = kf_json.value("s", 0.0);
+                    traj.keyframes_.push_back(kf);
+                }
+                traj.ResolveKeyframes();
             }
 
             new_trajectories[traj.entity_name_] = std::move(traj);

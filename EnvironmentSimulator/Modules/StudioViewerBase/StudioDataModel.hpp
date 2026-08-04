@@ -174,6 +174,21 @@ public:
     double EvaluateSAtTime(double t) const;
 };
 
+// A time keyframe constraint on a trajectory: "at time t, the vehicle should be at arc length s along the
+// path" (Trajectory_Editing_Enhancement.md). Only (t, s) is persisted; the world position is derived from
+// path_.Evaluate(s) at render time. achieved_t/feasible are solver outputs refreshed by ResolveKeyframes().
+struct TrajectoryKeyframe
+{
+    double t = 0.0;  // desired arrival time, seconds
+    double s = 0.0;  // position along the owning EntityPath's arc length
+
+    // Solve results (not persisted): the arrival time actually achievable after the last resolve. When the
+    // constraint cannot be met exactly (speed/acceleration limits), feasible is false and achieved_t tells
+    // the user what the clamped outcome is (P4 in Trajectory_Editing_Enhancement.md section 4).
+    double achieved_t = 0.0;
+    bool   feasible   = true;
+};
+
 // Binds together the path and speed profile of a single trajectory-editor-only vehicle. Such vehicles are
 // created via the "Add Trajectory" interaction (Trajectory_Editing.md section 6) and never correspond to any
 // xosc ScenarioObject.
@@ -183,6 +198,10 @@ public:
     std::string        entity_name_;  // only exists in .traj.json, never in xml_doc_
     EntityPath          path_;
     EntitySpeedProfile  speed_profile_;
+
+    // Time keyframes sorted by t (Trajectory_Editing_Enhancement.md): user-specified arrival-time constraints
+    // that ResolveKeyframes() turns into speed profile modifications via the P0-P4 cascade.
+    std::vector<TrajectoryKeyframe> keyframes_;
 
     bool HasPath() const
     {
@@ -201,6 +220,18 @@ public:
         if (speed_profile_.points_.size() >= 2)
             speed_profile_.points_.back().s = path_.GetTotalLength();
     }
+
+    // Re-solve all keyframe constraints against the current path/speed profile, mutating speed_profile_ via
+    // the minimal-intrusion cascade (Trajectory_Editing_Enhancement.md section 4: P0 precheck -> P1 scale
+    // existing nodes, no new points -> P2a insert one midpoint -> P2b accel-limited trapezoid, <=2 points ->
+    // P4 clamp + residual). Also clamps each keyframe's s into [0, path length] (the auto-re-solve semantics
+    // for later path geometry edits) and refreshes achieved_t/feasible on every keyframe.
+    void ResolveKeyframes();
+
+private:
+    // Solve a single inter-keyframe segment [s_a, s_b] so the travel time becomes target_dt. Returns the
+    // actually achieved travel time (== target_dt when the constraint could be met exactly).
+    double SolveKeyframeSegment(double s_a, double s_b, double target_dt, bool* out_feasible);
 };
 
 // Derive the ".traj.json" sidecar path from a ".xosc" path, e.g. "scenario.xosc" -> "scenario.traj.json".
