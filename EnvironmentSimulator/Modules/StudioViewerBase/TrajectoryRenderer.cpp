@@ -12,6 +12,8 @@
 
 #include "TrajectoryRenderer.hpp"
 
+#include <osg/BlendColor>
+#include <osg/BlendFunc>
 #include <osg/Geode>
 #include <osg/Geometry>
 #include <osg/LineWidth>
@@ -275,6 +277,22 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         ghost_tx->setPosition(osg::Vec3(static_cast<float>(ghost_pose.x), static_cast<float>(ghost_pose.y), static_cast<float>(ghost_pose.z)));
         ghost_tx->setAttitude(osg::Quat(ghost_pose.h, osg::Vec3(0.0, 0.0, 1.0)));
         ghost_tx->addChild(ghost_model.get());
+
+        // While this vehicle is being Ctrl-dragged along its path (keyframe editing), render it semi-
+        // transparent (0.7 alpha) as the visual cue for the "ghost editing" state. Constant-alpha blending
+        // is applied on the per-entity transform so the shared model node itself is not modified (same
+        // technique as the entity models in StudioGui::GetOSGBModelForScenarioObject()).
+        if (entity_name == ghost_override_entity_)
+        {
+            osg::ref_ptr<osg::StateSet>   state_set   = ghost_tx->getOrCreateStateSet();
+            osg::ref_ptr<osg::BlendColor> blend_color = new osg::BlendColor(osg::Vec4(1.0f, 1.0f, 1.0f, 0.7f));
+            osg::ref_ptr<osg::BlendFunc>  blend_func  = new osg::BlendFunc(osg::BlendFunc::CONSTANT_ALPHA, osg::BlendFunc::ONE_MINUS_CONSTANT_ALPHA);
+            state_set->setAttributeAndModes(blend_color.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            state_set->setAttributeAndModes(blend_func.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            state_set->setMode(GL_BLEND, osg::StateAttribute::ON);
+            state_set->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+        }
+
         group->addChild(ghost_tx.get());
     }
 }

@@ -1915,6 +1915,12 @@ void StudioGui::ResolveEntityKeyframes(const std::string& entity_name)
 bool StudioGui::HandleGhostKeyframeClick()
 {
     const double kGhostHitRadius = 2.5;  // meters; the ghost is a car-sized model, slightly larger than a point gizmo
+    const double kSameTimeEps    = 0.05;  // seconds; scrubbing back to (almost) a keyframe's time edits that keyframe
+
+    // Only Ctrl+drag enters ghost keyframe editing; a plain drag on the vehicle does nothing. This keeps
+    // accidental clicks from silently creating arrival-time constraints.
+    if (!ctrl_pressed_)
+        return false;
 
     if (data_model_.entity_trajectories_.empty())
         return false;
@@ -1949,31 +1955,61 @@ bool StudioGui::HandleGhostKeyframeClick()
     if (best_entity.empty())
         return false;
 
-    EntityTrajectory& traj = data_model_.entity_trajectories_[best_entity];
-
-    ghost_keyframe_drag_active_ = true;
-    ghost_drag_entity_name_     = best_entity;
-    ghost_drag_t_               = static_cast<double>(data_model_.virtual_time_);
-    ghost_drag_start_s_         = best_s;
-    ghost_drag_target_s_        = best_s;
-    ghost_drag_blocked_         = false;
+    EntityTrajectory& traj   = data_model_.entity_trajectories_[best_entity];
+    double            drag_t = static_cast<double>(data_model_.virtual_time_);
 
     // Neighbour keyframe blocking bounds (finalized decision: a keyframe's s must never cross an adjacent
     // keyframe's s, in either direction) plus "am I updating an existing keyframe at this time?".
-    const double kSameTimeEps = 0.05;  // seconds; scrubbing back to (almost) a keyframe's time edits that keyframe
-    ghost_drag_existing_kf_    = -1;
-    ghost_drag_s_min_          = 0.0;
-    ghost_drag_s_max_          = traj.path_.GetTotalLength();
+    int    existing_kf = -1;
+    double s_min       = 0.0;
+    double s_max       = traj.path_.GetTotalLength();
+    double prev_t      = 0.0;
     for (size_t i = 0; i < traj.keyframes_.size(); i++)
     {
         const TrajectoryKeyframe& kf = traj.keyframes_[i];
-        if (std::fabs(kf.t - ghost_drag_t_) <= kSameTimeEps)
-            ghost_drag_existing_kf_ = static_cast<int>(i);
-        else if (kf.t < ghost_drag_t_)
-            ghost_drag_s_min_ = std::max(ghost_drag_s_min_, kf.s);
+        if (std::fabs(kf.t - drag_t) <= kSameTimeEps)
+        {
+            existing_kf = static_cast<int>(i);
+        }
+        else if (kf.t < drag_t)
+        {
+            s_min  = std::max(s_min, kf.s);
+            prev_t = std::max(prev_t, kf.t);
+        }
         else
-            ghost_drag_s_max_ = std::min(ghost_drag_s_max_, kf.s);
+        {
+            s_max = std::min(s_max, kf.s);
+        }
     }
+
+    // A brand-new keyframe needs a usable time segment before it: "be at s>start at t=0" (timeline never
+    // scrubbed) or "arrive before/at the previous keyframe's time" is physically unsolvable - the solver
+    // would clamp and the vehicle would visibly snap back on release. Refuse up front with a clear reason
+    // instead (the click is still consumed so it doesn't fall through to xosc entity picking).
+    if (existing_kf < 0 && drag_t <= prev_t + kSameTimeEps)
+    {
+        if (prev_t <= kSameTimeEps)
+            LOG("Ghost keyframe: virtual time is %.2f s. Drag the timeline to the desired arrival time first, then Ctrl-drag the vehicle.",
+                drag_t);
+        else
+            LOG("Ghost keyframe: virtual time %.2f s is not after the previous keyframe at %.2f s. Drag the timeline further right first.",
+                drag_t,
+                prev_t);
+        return true;
+    }
+
+    ghost_keyframe_drag_active_ = true;
+    ghost_drag_entity_name_     = best_entity;
+    ghost_drag_t_               = drag_t;
+    ghost_drag_start_s_         = best_s;
+    ghost_drag_target_s_        = best_s;
+    ghost_drag_blocked_         = false;
+    ghost_drag_existing_kf_     = existing_kf;
+    ghost_drag_s_min_           = s_min;
+    ghost_drag_s_max_           = s_max;
+
+    // Show the 0.7-alpha "editing" ghost right away, before the first mouse move.
+    trajectory_renderer_.SetGhostOverride(best_entity, best_s);
 
     return true;
 }
@@ -2019,8 +2055,10 @@ void StudioGui::EndGhostKeyframeDrag(bool commit)
 
     EntityTrajectory& traj = it->second;
 
+    double committed_t = ghost_drag_t_;
     if (ghost_drag_existing_kf_ >= 0 && static_cast<size_t>(ghost_drag_existing_kf_) < traj.keyframes_.size())
     {
+        committed_t                                                     = traj.keyframes_[static_cast<size_t>(ghost_drag_existing_kf_)].t;
         traj.keyframes_[static_cast<size_t>(ghost_drag_existing_kf_)].s = ghost_drag_target_s_;
     }
     else
@@ -2037,6 +2075,21 @@ void StudioGui::EndGhostKeyframeDrag(bool commit)
     }
 
     traj.ResolveKeyframes();
+
+    // If the constraint had to be clamped (speed/acceleration limits), the vehicle will render at the
+    // reachable position instead of the drop position - explain the apparent "snap back" in the log.
+    for (const auto& kf : traj.keyframes_)
+    {
+        if (std::fabs(kf.t - committed_t) <= 0.05 && !kf.feasible)
+        {
+            LOG("Keyframe t=%.2f s cannot be met exactly (speed/acceleration limits). Reachable arrival is %.2f s. "
+                "The vehicle shows the reachable position for the current time, hence the jump after release.",
+                kf.t,
+                kf.achieved_t);
+            break;
+        }
+    }
+
     data_model_.trajectories_modified_ = true;
     trajectory_renderer_.MarkDirty(ghost_drag_entity_name_);
     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
@@ -2582,7 +2635,7 @@ void StudioGui::RenderTrajectoriesTab()
             ImGui::SeparatorText("Keyframes");
             if (traj.keyframes_.empty())
             {
-                ImGui::TextDisabled("No keyframes. Scrub the timeline and drag the ghost vehicle along its path to add one.");
+                ImGui::TextDisabled("No keyframes. Scrub the timeline, then Ctrl-drag the vehicle along its path to add one.");
             }
             else
             {
