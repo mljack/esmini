@@ -419,19 +419,42 @@ bool           TrajectoriesFromJson(const nlohmann::json& root); // json -> enti
 - 优点：零新增序列化代码、零新增比较/patch 逻辑，序列化/反序列化路径与"保存/加载到磁盘"完全一致，被同一套代码覆盖，天然不会出现"undo 恢复出来的状态和真实加载的状态不一致"的问题。
 - 代价：每次提交都复制一份完整快照（字符串），而不是只存增量补丁。按典型场景（几辆车 × 数十个点）估算，单份快照通常在几 KB 量级，即使按 `MAX_UNDO_STACK_SIZE`（50，见下）存满，总内存也在数百 KB 量级，可忽略不计——用"多占一点内存"换"实现简单、可靠"是合算的。
 
-### 11.3 数据结构
+### 11.3 数据结构：把"选中状态"作为撤销条目的一部分，而不是单独维护的一套栈
+
+用户体验上，撤销/重做一次路径点或 Speed Profile 点的编辑，应该连带恢复"当时选中的是哪个点"，不能让选中态原地不动、和刚恢复回来的数据对不上（例如撤销后地图视图上的红色高亮 gizmo 还留在一个已经被撤销掉的点的位置，或者干脆指向一个现在已经不存在的下标）。选中状态（`trajectory_point_selected_`/`trajectory_selected_entity_name_`/`trajectory_selected_point_index_`，以及 Speed Profile 图表的 `speed_point_selected_` 等三个同名成员）目前存在 `StudioGui`，`entity_trajectories_` 数据本身存在 `StudioDataModel`——为了不打破这层归属关系（`StudioDataModel` 不反向依赖 `StudioGui` 的成员），选中态**不是**由 `StudioDataModel` 自己去读，而是由调用方（`StudioGui`）在提交/撤销/重做时显式传入、取回：
 
 ```cpp
-// StudioDataModel.hpp，与现有 undo_stack_/redo_stack_ 风格保持一致，独立的一套栈
-std::deque<std::string> trajectory_undo_stack_;   // 每个元素是一份完整的 TrajectoriesToJson().dump() 快照（撤销后的目标状态）
-std::deque<std::string> trajectory_redo_stack_;
-std::string             current_trajectory_snapshot_;  // 当前已知状态的快照，PushTrajectoryUndoState() 用它做"是否真的变了"的比对
+// StudioDataModel.hpp：选中状态的一个不透明快照，StudioDataModel 只负责原样存取，不解释其含义
+struct TrajectorySelectionSnapshot
+{
+    bool        path_point_selected  = false;
+    std::string path_point_entity;
+    int         path_point_index     = -1;
+    bool        speed_point_selected = false;
+    std::string speed_point_entity;
+    int         speed_point_index    = -1;
+};
+
+// 一条撤销/重做记录 = 数据快照 + "应用这条记录之后应该恢复成的选中状态"，两者绑定在一起、
+// 不再需要额外维护一套下标对齐的并行栈来保证不错位——这是比"选中态单独开一套并行栈"更简单、
+// 也更不容易出 bug 的做法：选中态天然和它所属的那份数据快照一起被捕获、一起被恢复，不存在
+// "数据栈弹出了但选中态栈忘了同步弹出"这类不一致的可能。
+struct TrajectoryUndoEntry
+{
+    std::string                 data_json;  // TrajectoriesToJson().dump()
+    TrajectorySelectionSnapshot selection;
+};
+
+std::deque<TrajectoryUndoEntry> trajectory_undo_stack_;
+std::deque<TrajectoryUndoEntry> trajectory_redo_stack_;
+TrajectoryUndoEntry              current_trajectory_entry_;  // 当前已知状态（数据 + 选中态）
 
 // 用于在 xml 和 trajectory 两套独立栈之间路由 Ctrl+Z/Ctrl+Shift+Z（见 11.4 节），
 // 两套 PushXxxUndoState() 都会递增同一个计数器
 size_t edit_sequence_counter_ = 0;
+size_t undo_sequence_counter_ = 0;  // 见 11.4 节：Redo 路由用的独立计数器
 
-// 与 trajectory_undo_stack_/trajectory_redo_stack_ 一一对应（下标对齐），记录压栈时的 edit_sequence_counter_ 取值
+// 与 trajectory_undo_stack_/trajectory_redo_stack_ 一一对应（下标对齐），记录压栈时的计数器取值
 std::deque<size_t> trajectory_undo_seq_stack_;
 std::deque<size_t> trajectory_redo_seq_stack_;
 // xml 侧同理新增 undo_seq_stack_/redo_seq_stack_，与已有的 undo_stack_/redo_stack_ 一一对应
@@ -440,28 +463,35 @@ static const size_t MAX_TRAJECTORY_UNDO_STACK_SIZE = 50;  // 沿用与 MAX_UNDO_
 
 bool CanUndoTrajectories() const { return !trajectory_undo_stack_.empty(); }
 bool CanRedoTrajectories() const { return !trajectory_redo_stack_.empty(); }
-void PushTrajectoryUndoState();     // 调用约定与现有 PushUndoState() 完全一致（见 11.5 节）
-void UndoTrajectories();
-void RedoTrajectories();
+
+// selection_after_edit：提交这次编辑之后应该处于的选中状态，调用方通常就传自己"此刻"的选中态
+// （例如一次拖拽结束后，被拖拽的点自然还是选中的；一次删除操作后，调用方应传一个"未选中"的快照）
+void PushTrajectoryUndoState(const TrajectorySelectionSnapshot& selection_after_edit);
+
+// 返回值是撤销/重做完成后应该恢复成的选中状态，调用方据此设置自己的 trajectory_point_selected_ 等成员
+// （见 11.4 节 StudioGui::Undo()/Redo() 的用法）
+TrajectorySelectionSnapshot UndoTrajectories();
+TrajectorySelectionSnapshot RedoTrajectories();
+
 void ClearTrajectoryUndoRedoStacks();  // 加载新的 .traj.json / 新的 .xosc（连带触发的自动加载）时调用，避免撤销进上一个文件的状态
 ```
 
-`PushTrajectoryUndoState()` 的实现方式与 `PushUndoState()` 完全对应（只是用字符串整体比较代替行级 diff）：
+`PushTrajectoryUndoState()`/`UndoTrajectories()` 的实现方式与 11.2 节的比对逻辑完全对应，只是多存/多传一份 `TrajectorySelectionSnapshot`：
 
 ```cpp
-void StudioDataModel::PushTrajectoryUndoState()
+void StudioDataModel::PushTrajectoryUndoState(const TrajectorySelectionSnapshot& selection_after_edit)
 {
-    std::string new_state = TrajectoriesToJson().dump();
+    std::string new_data = TrajectoriesToJson().dump();
 
-    if (current_trajectory_snapshot_.empty())
+    if (current_trajectory_entry_.data_json.empty())
     {
-        current_trajectory_snapshot_ = new_state;
+        current_trajectory_entry_ = {new_data, selection_after_edit};
         return;
     }
-    if (new_state == current_trajectory_snapshot_)
-        return;  // 没有实际变化（例如一次"点了一下但没拖动"的手势），不占用撤销栈
+    if (new_data == current_trajectory_entry_.data_json)
+        return;  // 数据没有实际变化（选中态单独变化不算一次可撤销的编辑），不占用撤销栈
 
-    trajectory_undo_stack_.push_back(current_trajectory_snapshot_);  // 记录"撤销后应恢复到"的旧状态
+    trajectory_undo_stack_.push_back(current_trajectory_entry_);  // 撤销后应恢复到的旧 entry（含旧选中态）
     trajectory_undo_seq_stack_.push_back(++edit_sequence_counter_);
     if (trajectory_undo_stack_.size() > MAX_TRAJECTORY_UNDO_STACK_SIZE)
     {
@@ -469,19 +499,40 @@ void StudioDataModel::PushTrajectoryUndoState()
         trajectory_undo_seq_stack_.pop_front();
     }
 
-    trajectory_redo_stack_.clear();      // 新动作发生后，之前的 redo 历史失效
+    trajectory_redo_stack_.clear();
     trajectory_redo_seq_stack_.clear();
-    current_trajectory_snapshot_ = new_state;
-    trajectories_modified_       = true;
+    current_trajectory_entry_ = {new_data, selection_after_edit};
+    trajectories_modified_    = true;
 }
+
+TrajectorySelectionSnapshot StudioDataModel::UndoTrajectories()
+{
+    if (trajectory_undo_stack_.empty())
+        return current_trajectory_entry_.selection;  // 没有可撤销的，保持原状
+
+    TrajectoryUndoEntry old_entry = trajectory_undo_stack_.back();
+    trajectory_undo_stack_.pop_back();
+    trajectory_undo_seq_stack_.pop_back();
+
+    trajectory_redo_stack_.push_back(current_trajectory_entry_);  // 当前状态（含选中态）存入 redo，重做时能回来
+    trajectory_redo_seq_stack_.push_back(++undo_sequence_counter_);
+
+    current_trajectory_entry_ = old_entry;
+    TrajectoriesFromJson(nlohmann::json::parse(old_entry.data_json));
+    trajectories_modified_ = true;
+    return old_entry.selection;
+}
+// RedoTrajectories() 结构对称：从 trajectory_redo_stack_ 弹出、把当前 entry 压回 trajectory_undo_stack_
 ```
 
-### 11.4 路由：Ctrl+Z / Ctrl+Shift+Z 到底作用于哪一套栈
+由于选中态和它所属的数据快照是同一个 `TrajectoryUndoEntry` 里绑在一起捕获、绑在一起恢复的，恢复出来的 `path_point_index`/`speed_point_index` 天然保证在恢复出的那份数据里是合法下标——不需要额外校验"这个下标现在是不是还有效"。
+
+### 11.4 路由：Ctrl+Z / Ctrl+Shift+Z 到底作用于哪一套栈，以及选中态如何跟着恢复
 
 `entity_trajectories_` 与 `xml_doc_` 是两套独立数据、两套独立撤销栈，但用户体感上仍然希望"按 Ctrl+Z 就撤销我刚做的那个操作"，不管刚才编辑的是 XML 树还是轨迹/速度曲线。做法：两套 `PushXxxUndoState()` 共用同一个单调递增计数器 `edit_sequence_counter_`，每次真正压栈（不是"没有变化被跳过"的那种）都各自记录当时的计数器取值（`undo_seq_stack_`/`trajectory_undo_seq_stack_`）。
 
 - **Undo 路由**：比较两个 undo 栈"栈顶"各自记录的序号，谁的序号更大（更晚发生）就撤销谁；某一方为空则直接选另一方。
-- **Redo 路由**：对称地维护 `redo_seq_stack_`/`trajectory_redo_seq_stack_`——每次 Undo 把弹出的状态压入对应 redo 栈时，也记一个"撤销发生时"的序号（用一个单独的 `undo_sequence_counter_` 递增，不与 `edit_sequence_counter_` 混用），Redo 时比较两个 redo 栈栈顶的这个序号，选更晚被撤销的那一个先恢复。这保证了"连续按多次 Ctrl+Z 再连续按多次 Ctrl+Shift+Z"能严格按时间倒序/正序在两套系统之间正确交替，而不会出现"明明刚撤销的是轨迹改动，重做却先重做了 XML 改动"的错乱。
+- **Redo 路由**：对称地维护 `redo_seq_stack_`/`trajectory_redo_seq_stack_`——每次 Undo 把弹出的状态压入对应 redo 栈时，也记一个"撤销发生时"的序号（用 `undo_sequence_counter_` 递增，不与 `edit_sequence_counter_` 混用），Redo 时比较两个 redo 栈栈顶的这个序号，选更晚被撤销的那一个先恢复。这保证了"连续按多次 Ctrl+Z 再连续按多次 Ctrl+Shift+Z"能严格按时间倒序/正序在两套系统之间正确交替，而不会出现"明明刚撤销的是轨迹改动，重做却先重做了 XML 改动"的错乱。
 
 ```cpp
 // StudioGui.cpp，替换现有 Undo()/Redo() 的实现（原本只调用 data_model_.Undo()/Redo()）
@@ -496,49 +547,68 @@ void StudioGui::Undo()
     bool xml_is_newer = data_model_.CanUndo() &&
                         (!data_model_.CanUndoTrajectories() || data_model_.LastXmlUndoSeq() > data_model_.LastTrajectoryUndoSeq());
     if (xml_is_newer)
-        data_model_.Undo();
+    {
+        data_model_.Undo();  // 只影响 xml_doc_，与轨迹的选中态无关，不需要处理
+    }
     else if (data_model_.CanUndoTrajectories())
-        data_model_.UndoTrajectories();
-
-    // 撤销/重做可能改变了 entity_trajectories_ 里的点数/顺序，任何还指向旧索引的选中/拖动状态都作废
-    trajectory_point_selected_ = false;
-    trajectory_selected_point_index_ = -1;
-    trajectory_selected_entity_name_.clear();
-    speed_point_selected_ = false;
-    speed_selected_point_index_ = -1;
-    speed_selected_entity_name_.clear();
+    {
+        ApplyTrajectorySelectionSnapshot(data_model_.UndoTrajectories());
+    }
 
     scenario_object_map_dirty_ = true;
     positions_extracted_       = false;
 }
-// Redo() 结构相同，比较 LastXmlRedoSeq()/LastTrajectoryRedoSeq()
+// Redo() 结构相同，比较 LastXmlRedoSeq()/LastTrajectoryRedoSeq()，调用 data_model_.RedoTrajectories()
+
+// 把 TrajectorySelectionSnapshot 应用回 StudioGui 自己的选中态成员；同时防御性地结束任何正在进行的
+// 拖拽状态——理论上不会发生（上面已经在手势进行中直接 return），这里只是双重保险，避免拖拽起点缓存的
+// 坐标/索引指向撤销/重做之后已经不存在的点。
+void StudioGui::ApplyTrajectorySelectionSnapshot(const TrajectorySelectionSnapshot& sel)
+{
+    trajectory_point_selected_        = sel.path_point_selected;
+    trajectory_selected_entity_name_  = sel.path_point_entity;
+    trajectory_selected_point_index_  = sel.path_point_index;
+    speed_point_selected_             = sel.speed_point_selected;
+    speed_selected_entity_name_       = sel.speed_point_entity;
+    speed_selected_point_index_       = sel.speed_point_index;
+
+    trajectory_point_drag_active_ = false;
+    speed_point_drag_active_      = false;
+
+    // ImGui 的 InputFloat 在"正被键盘编辑中"时会缓存自己的编辑缓冲区，不会每帧从传入的 float* 重新拉取；
+    // 如果撤销/重做恰好改变了正在编辑的那个数值框背后的数据，需要先清掉当前活动控件，逼它下一帧重新从
+    // （已更新的）底层数据同步，否则编辑框会短暂显示撤销前的旧值，见 11.6 节。
+    ImGui::ClearActiveID();
+}
 ```
 
 `data_model_.CanUndo() || data_model_.CanUndoTrajectories()` 作为菜单项的 enable 条件（[StudioGui.cpp:2541](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2541) 起的 `MenuItem("Undo", "Ctrl+Z", ...)`），Redo 同理。可选的进一步优化：菜单文案根据即将执行的是哪一套栈动态显示，例如 `Undo (Trajectory)` / `Undo (OpenSCENARIO)`，非必需，可作为后续小优化。
 
 ### 11.5 提交粒度：什么时候调用 `PushTrajectoryUndoState()`
 
-原则与现有 `SetModified()`/`PushUndoState()` 的调用方式一致——**每个"手势"结束时提交一次，而不是过程中每帧都提交**（参考现有 `heading_operation_active_` 只在 `ConfirmHeadingOperation()` 提交一次，`UpdateHeadingOperation()` 过程中不提交）：
+原则与现有 `SetModified()`/`PushUndoState()` 的调用方式一致——**每个"手势"结束时提交一次，而不是过程中每帧都提交**（参考现有 `heading_operation_active_` 只在 `ConfirmHeadingOperation()` 提交一次，`UpdateHeadingOperation()` 过程中不提交）。每个提交点都传入调用当时 `StudioGui` 自己的选中态（`trajectory_point_selected_` 等 6 个成员打包成 `TrajectorySelectionSnapshot`）作为 `selection_after_edit` 参数：
 
 | 操作 | 提交时机 | 说明 |
 |---|---|---|
 | `Add Trajectory` 新建车辆 | `FinishTrajectoryPicking()`（`Enter` 提交时） | 整个连续点选会话只算一次撤销单元，不逐点提交；会话内部的 `Esc` 逐点撤销（第 6.1 节）是本地状态机的事，不经过全局撤销栈 |
-| 删除整条轨迹（Trajectories Tab 的 `Delete` 按钮） | 删除后立即提交 | |
-| 3D 视图拖拽路径点 | `EndTrajectoryPointDrag()`（松开鼠标时），而不是 `UpdateTrajectoryPointDrag()` 过程中 | |
+| 删除整条轨迹（Trajectories Tab 的 `Delete` 按钮） | 删除后立即提交 | 传入的选中态应先清空指向被删实体的选中（若选中的正是被删的实体） |
+| 3D 视图拖拽路径点 | `EndTrajectoryPointDrag()`（松开鼠标时），而不是 `UpdateTrajectoryPointDrag()` 过程中 | 拖拽结束后被拖的点仍保持选中，选中态随这次提交一起存入 |
 | 3D 视图右键 `Insert Point`/`Delete Point` | 菜单项点击后立即提交 | 见 `HandleTrajectoryPointRightClick()` 配套的 `HandleViewportContextMenu()` 弹窗处理 |
 | Speed Profile 图表拖拽点 | 拖动结束（`speed_point_drag_active_` 从 true 变回 false 的那一帧），而不是拖动过程中 | |
 | Speed Profile 图表右键 `Insert Point`/`Delete Point` | 菜单项点击后立即提交 | |
 | Speed Profile 数值表格编辑（s/speed 的 `InputFloat`） | 使用 `ImGui::IsItemDeactivatedAfterEdit()` 判断"这次编辑输入框已经结束"再提交，而不是每个按键都提交 | |
 | Speed Profile 表格下方 `Add Point`/`Delete` 按钮 | 点击后立即提交 | |
-| `Load Trajectories...` / 打开 xosc 连带自动加载 `.traj.json` | **不提交**，改为调用 `ClearTrajectoryUndoRedoStacks()` | 整体换了一份文件，不应该允许撤销回上一个文件的内容 |
+| `Load Trajectories...` / 打开 xosc 连带自动加载 `.traj.json` | **不提交**，改为调用 `ClearTrajectoryUndoRedoStacks()` | 整体换了一份文件，不应该允许撤销回上一个文件的内容；同时清空 `trajectory_point_selected_`/`speed_point_selected_`（第 5.4 节现有加载流程已经在做类似的选中态清理） |
 
 ### 11.6 需要同步处理的边界情况
 
 | 问题 | 应对 |
 |---|---|
-| 撤销/重做把点数/索引改变了，但地图视图/图表里还有一个"选中的点"指向旧索引 | Undo/Redo 分发函数（11.4 节的 `StudioGui::Undo()`/`Redo()`）统一清空 `trajectory_point_selected_`/`speed_point_selected_` 等选中状态，代价是撤销后需要重新选中，但避免了索引错位导致的越界/指错对象 |
+| 撤销/重做后地图视图/图表里的"选中点"要跟着回到当时的状态，而不是简单清空 | 见 11.3/11.4 节：选中态作为 `TrajectoryUndoEntry` 的一部分与数据快照绑定捕获/恢复，`StudioGui::Undo()`/`Redo()` 用返回的 `TrajectorySelectionSnapshot` 调用 `ApplyTrajectorySelectionSnapshot()` 整体赋值回自己的成员，不是无脑清空 |
+| 撤销/重做后要及时反映到 3D 视图和 Speed Profile 图表/表格，不能让撤销前的画面/数值残留 | `EntityTrajectoryRenderer::Update()`（[TrajectoryRenderer.cpp](EnvironmentSimulator/Modules/StudioViewerBase/TrajectoryRenderer.cpp#L253)）本来就是**每帧无条件重建每个 entity 的组**（既有实现的注释已经写明"every entity is rebuilt every frame"），`RenderTrajectoriesTab()` 的图表/表格也是每帧直接从 `entity_trajectories_`/选中态成员重新读取、没有任何跨帧缓存——只要 `StudioGui::Undo()`/`Redo()` 在同一次调用里同步更新完 `entity_trajectories_`（通过 `TrajectoriesFromJson`）和选中态成员，下一帧 3D 视图与 UI 会自动全部刷新到位，**不需要**额外的"强制刷新"调用。唯一需要显式处理的是 ImGui 内部会跨帧缓存自身编辑状态的控件（见下一行） |
+| 撤销/重做恰好发生在某个 `InputFloat` 正处于键盘编辑焦点（`IsItemActive`）时，该数值框背后的数据被改变了 | ImGui 的文本/数值输入框在"激活编辑中"状态下有自己的内部编辑缓冲区，不会每帧重新从传入的 `float*` 拉取，可能短暂显示撤销前的旧值。`ApplyTrajectorySelectionSnapshot()` 里额外调用一次 `ImGui::ClearActiveID()`，强制释放当前激活控件，逼它下一帧重新从（已更新的）底层数据同步 |
 | Ctrl+Z 时正好有拖拽/连续点选等手势在进行中 | 直接忽略这次 Ctrl+Z（见 11.4 节分发函数开头的 guard），不尝试"先提交手势再撤销"，避免行为复杂化 |
-| `Load Trajectories...` 或打开新 xosc 触发的自动加载 | 调用 `ClearTrajectoryUndoRedoStacks()`（对称地，加载新 xosc 时现有 `ClearUndoRedoStacks()` 已经在做同样的事） |
+| `Load Trajectories...` 或打开新 xosc 触发的自动加载 | 调用 `ClearTrajectoryUndoRedoStacks()`（对称地，加载新 xosc 时现有 `ClearUndoRedoStacks()` 已经在做同样的事），并清空选中态 |
 | 每次提交都执行一次 JSON 序列化 + 字符串比较 | 数据量小（几 KB 级），性能可忽略；比 XML 的行级 diff 简单得多，是本方案刻意的取舍 |
 | `trajectories_modified_` 脏标记 | `PushTrajectoryUndoState()` 成功压栈时顺带置位（与现有 xml `Undo()`/`Redo()` 无条件把 `modified_` 置为 true 的做法一致），不做"是否恰好撤销回了上次保存时的状态"这类精确判断 |
 
@@ -548,11 +618,12 @@ void StudioGui::Undo()
 
 ### 11.8 集成点清单（实现时的检查表）
 
-1. `StudioDataModel.hpp/.cpp`：抽出 `TrajectoriesToJson()`/`TrajectoriesFromJson()`；`SaveTrajJson`/`LoadTrajJson` 改为调用它们；新增 11.3 节的成员与四个函数；`xml_doc_` 侧的 `undo_stack_`/`redo_stack_` 也需要各自新增一个并行的 `undo_seq_stack_`/`redo_seq_stack_`（仅用于 11.4 节的路由比较，不影响原有 diff 逻辑）。
-2. `StudioGui.cpp`：`Undo()`/`Redo()`（[L2574](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2574)、[L2583](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2583)）按 11.4 节改写；`Edit` 菜单的 `Undo`/`Redo` `MenuItem` 的 enable 条件（[L2541](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2541) 起）、legacy `Ctrl+Z`/`Ctrl+Shift+Z` 快捷键分支（约 [L2919](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2919) 起）同步改为 `CanUndo() || CanUndoTrajectories()`。
-3. 按 11.5 节表格，在 `FinishTrajectoryPicking()`、`RemoveEntityTrajectory` 调用处（Trajectories Tab 的 `Delete` 按钮）、`EndTrajectoryPointDrag()`、3D 视图与 Speed Profile 图表的 `Insert Point`/`Delete Point` 菜单处理、Speed Profile 拖拽结束处、数值表格 `InputFloat` 的 `IsItemDeactivatedAfterEdit()` 分支、`Add Point`/表格 `Delete` 按钮处，分别插入一次 `data_model_.PushTrajectoryUndoState()` 调用。
-4. `Load Trajectories...` 菜单项与"打开 xosc 时自动加载 .traj.json"两处，改为调用 `data_model_.ClearTrajectoryUndoRedoStacks()`。
+1. `StudioDataModel.hpp/.cpp`：抽出 `TrajectoriesToJson()`/`TrajectoriesFromJson()`；`SaveTrajJson`/`LoadTrajJson` 改为调用它们；新增 `TrajectorySelectionSnapshot`/`TrajectoryUndoEntry`（11.3 节）与四个撤销/重做相关函数；`xml_doc_` 侧的 `undo_stack_`/`redo_stack_` 也需要各自新增一个并行的 `undo_seq_stack_`/`redo_seq_stack_`（仅用于 11.4 节的路由比较，不影响原有 diff 逻辑）。
+2. `StudioGui.cpp`：`Undo()`/`Redo()`（[L2574](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2574)、[L2583](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2583)）按 11.4 节改写；新增 `ApplyTrajectorySelectionSnapshot()` 辅助函数；`Edit` 菜单的 `Undo`/`Redo` `MenuItem` 的 enable 条件（[L2541](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2541) 起）、legacy `Ctrl+Z`/`Ctrl+Shift+Z` 快捷键分支（约 [L2919](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2919) 起）同步改为 `CanUndo() || CanUndoTrajectories()`。
+3. 按 11.5 节表格，在 `FinishTrajectoryPicking()`、`RemoveEntityTrajectory` 调用处（Trajectories Tab 的 `Delete` 按钮）、`EndTrajectoryPointDrag()`、3D 视图与 Speed Profile 图表的 `Insert Point`/`Delete Point` 菜单处理、Speed Profile 拖拽结束处、数值表格 `InputFloat` 的 `IsItemDeactivatedAfterEdit()` 分支、`Add Point`/表格 `Delete` 按钮处，分别插入一次"打包当前选中态 + 调用 `data_model_.PushTrajectoryUndoState(...)`"。
+4. `Load Trajectories...` 菜单项与"打开 xosc 时自动加载 .traj.json"两处，改为调用 `data_model_.ClearTrajectoryUndoRedoStacks()` 并清空选中态成员。
 5. 单元测试：`TrajectoriesToJson()/TrajectoriesFromJson()` 往返一致性（见 11.7 节）。
+
 
 
 
