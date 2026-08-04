@@ -54,6 +54,15 @@ public:
     void UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points, double mouse_x, double mouse_y, double mouse_z);
     void ClearPickingPreview();
 
+    // Ghost keyframe editing support (Trajectory_Editing_Enhancement.md section 7): the ghost's current arc
+    // length + pose as computed during the last Update(), for hit-testing a click against the ghost vehicle.
+    bool GetGhostState(const std::string& entity_name, double* out_s, EntityPose* out_pose) const;
+
+    // While a ghost is being dragged along its path, override its rendered position with the drag's current
+    // target arc length instead of the virtual_time-derived one. Pass an empty name to clear.
+    void SetGhostOverride(const std::string& entity_name, double s);
+    void ClearGhostOverride();
+
 private:
     osg::ref_ptr<osg::Group> root_;
     osg::ref_ptr<osg::Group> picking_preview_group_;
@@ -63,6 +72,17 @@ private:
 
     std::string selected_entity_name_;
     int         selected_point_index_ = -1;
+
+    // Ghost states captured during the last Update() (arc length + world pose per entity), used by StudioGui
+    // for ghost click hit-testing; plus the optional drag-time position override.
+    struct GhostState
+    {
+        double     s = 0.0;
+        EntityPose pose;
+    };
+    std::map<std::string, GhostState> ghost_states_;
+    std::string                       ghost_override_entity_;
+    double                            ghost_override_s_ = 0.0;
 
     // Shared default vehicle model used for every ghost marker (Trajectory_Editing.md section 7.2): trajectory-
     // editor-only vehicles have no xosc CatalogReference, so a single fixed VehicleCatalog.xosc entry is used

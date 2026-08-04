@@ -35,6 +35,7 @@ const osg::Vec4 kPreviewLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 0.6f);  // sa
 const double    kLineZOffset        = 0.2;
 const double    kVertexMarkerRadius = 0.3;
 const double    kGizmoRadius        = 1.2;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
+const double    kKeyframeMarkerSize = 1.6;  // keyframe "diamond" (a box yawed 45 deg reads as a diamond in the top-down view)
 
 osg::ref_ptr<osg::Node> BuildLineStripNode(const std::vector<osg::Vec3>& points, const osg::Vec4& color, float line_width)
 {
@@ -233,11 +234,39 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         group->addChild(tx.get());
     }
 
-    // Ghost marker: the vehicle's position along the path at the current virtual_time (Trajectory_Editing.md 9.3).
-    double s    = traj.speed_profile_.EvaluateSAtTime(static_cast<double>(virtual_time));
+    // Keyframe markers (Trajectory_Editing_Enhancement.md 7.4): a 45-degree-yawed box ("diamond" from the
+    // top-down view) at each keyframe's position on the path; infeasible (clamped) keyframes get a red
+    // cylinder instead so conflicts are visible at a glance.
+    for (const auto& kf : traj.keyframes_)
+    {
+        EntityPose kf_pose = traj.path_.Evaluate(kf.s);
+
+        osg::ref_ptr<osg::PositionAttitudeTransform> kf_tx = new osg::PositionAttitudeTransform();
+        kf_tx->setPosition(osg::Vec3(static_cast<float>(kf_pose.x), static_cast<float>(kf_pose.y), static_cast<float>(kf_pose.z + kLineZOffset)));
+        if (kf.feasible)
+        {
+            kf_tx->setAttitude(osg::Quat(M_PI / 4.0, osg::Vec3(0.0, 0.0, 1.0)));
+            kf_tx->addChild(CreateBlueBoxGeometry(kKeyframeMarkerSize, kKeyframeMarkerSize, kKeyframeMarkerSize));
+        }
+        else
+        {
+            kf_tx->addChild(CreateRedCylinderGeometry(kKeyframeMarkerSize * 0.5, kKeyframeMarkerSize, 12));
+        }
+        group->addChild(kf_tx.get());
+    }
+
+    // Ghost marker: the vehicle's position along the path at the current virtual_time (Trajectory_Editing.md 9.3),
+    // or the drag override while the user is sliding the ghost along the path (Trajectory_Editing_Enhancement.md 7.2).
     double total_len = traj.path_.GetTotalLength();
-    s                 = std::max(0.0, std::min(s, total_len));
+    double s;
+    if (entity_name == ghost_override_entity_)
+        s = ghost_override_s_;
+    else
+        s = traj.speed_profile_.EvaluateSAtTime(static_cast<double>(virtual_time));
+    s                     = std::max(0.0, std::min(s, total_len));
     EntityPose ghost_pose = traj.path_.Evaluate(s);
+
+    ghost_states_[entity_name] = GhostState{s, ghost_pose};
 
     osg::ref_ptr<osg::Node> ghost_model = GetOrLoadGhostModel();
     if (ghost_model.valid())
@@ -262,6 +291,7 @@ void EntityTrajectoryRenderer::Update(const StudioDataModel& model, StudioMode /
         {
             root_->removeChild(it->second.get());
             dirty_flags_.erase(it->first);
+            ghost_states_.erase(it->first);
             it = per_entity_groups_.erase(it);
         }
         else
@@ -278,6 +308,30 @@ void EntityTrajectoryRenderer::Update(const StudioDataModel& model, StudioMode /
         RebuildEntityGroup(entry.first, entry.second, virtual_time);
     }
     dirty_flags_.clear();
+}
+
+bool EntityTrajectoryRenderer::GetGhostState(const std::string& entity_name, double* out_s, EntityPose* out_pose) const
+{
+    auto it = ghost_states_.find(entity_name);
+    if (it == ghost_states_.end())
+        return false;
+    if (out_s)
+        *out_s = it->second.s;
+    if (out_pose)
+        *out_pose = it->second.pose;
+    return true;
+}
+
+void EntityTrajectoryRenderer::SetGhostOverride(const std::string& entity_name, double s)
+{
+    ghost_override_entity_ = entity_name;
+    ghost_override_s_      = s;
+}
+
+void EntityTrajectoryRenderer::ClearGhostOverride()
+{
+    ghost_override_entity_.clear();
+    ghost_override_s_ = 0.0;
 }
 
 void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points, double mouse_x, double mouse_y, double mouse_z)
