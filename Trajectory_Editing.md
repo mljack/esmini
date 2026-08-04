@@ -398,7 +398,7 @@ $$t(s) = \int_0^s \frac{1}{v(s')}\,ds'$$
 
 ## 11. Undo/Redo 技术方案
 
-> 状态更新：本节最初把轨迹相关的 Undo/Redo 列为"核心功能稳定后再评估"的后续可选项、不在 M1-M7 里程碑之内；现在核心编辑/预览/在线编辑功能均已跑通并可用，本节给出可以直接落地的技术方案，对应第 14 节新增的 M8 里程碑。**本节只是设计方案，尚未实现**，实现时按 11.8 节的集成点清单逐步接入。
+> 状态更新：本节最初把轨迹相关的 Undo/Redo 列为"核心功能稳定后再评估"的后续可选项、不在 M1-M7 里程碑之内；现在核心编辑/预览/在线编辑功能均已跑通并可用，本节给出的技术方案对应第 14 节的 M8 里程碑，**已按 11.8 节的集成点清单实现完成**（`TrajectoriesToJsonString`/`TrajectoriesFromJsonString`、独立的轨迹撤销栈、跨 xml/轨迹两套栈的序号路由、各交互手势的提交点，均已接入 `StudioDataModel`/`StudioGui`）。
 
 ### 11.1 现状回顾
 
@@ -663,7 +663,7 @@ void StudioGui::ApplyTrajectorySelectionSnapshot(const TrajectorySelectionSnapsh
 5. **M5 路径点拖拽编辑**：地图视图内直接拖拽已有路径点（第 7.4 节），不支持中途插入/删除点（第 6.3 节已定稿，留待后续迭代）。
 6. **M6 Ghost 动画预览**：实现 9.3 节 s-t 映射与 ghost marker 动画，三模式下都可"播放"编辑后的轨迹。
 7. **M7 两个保存入口 + 生命周期同步 + 收尾**：接入 `Save OpenSCENARIO`/`Save Trajectories` 独立菜单与脏标记提示；补充 `RenameEntity`/`CloneEntity`/`DeleteEntity` 的 `entity_trajectories_` 同步（第 12 节）；补充单元测试覆盖 path/speed 曲线计算与 JSON 序列化往返一致性。
-8. **M8 Undo/Redo**（第 11 节，方案已定稿，待实现）：按 11.8 节的集成点清单实现 `TrajectoriesToJson`/`TrajectoriesFromJson` 抽取、独立的轨迹撤销栈、与现有 xml 撤销栈之间基于序号的 Ctrl+Z/Ctrl+Shift+Z 路由，以及各交互手势的提交点接入。
+8. **M8 Undo/Redo**（第 11 节）：`TrajectoriesToJsonString`/`TrajectoriesFromJsonString` 抽取、独立的轨迹撤销栈、与现有 xml 撤销栈之间基于序号的 Ctrl+Z/Ctrl+Shift+Z 路由，以及各交互手势的提交点接入，均已按 11.8 节的集成点清单实现完成。
 
 ---
 
