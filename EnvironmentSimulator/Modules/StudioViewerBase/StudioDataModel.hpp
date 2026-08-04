@@ -25,6 +25,7 @@
 #include "OSCBoundingBox.hpp"
 #include "XmlUtil.hpp"
 #include "Parameters.hpp"
+#include "TrajectorySolver.hpp"
 
 enum class StudioMode
 {
@@ -137,57 +138,9 @@ private:
     void BuildFineSamples(std::vector<EntityPose>* out_poses, std::vector<double>* out_cumulative_s) const;
 };
 
-// A single distance-based speed profile point.
-struct SpeedProfilePoint
-{
-    double s     = 0.0;  // position along the owning EntityPath's arc length (distance-based)
-    double speed = 0.0;  // target speed at that position, in m/s
-};
-
-// A distance-based speed profile: speed as a function of arc length s along the owning EntityPath.
-class EntitySpeedProfile
-{
-public:
-    enum class InterpMode
-    {
-        LINEAR,
-        MONOTONIC_CUBIC
-    };
-
-    std::vector<SpeedProfilePoint> points_;
-    InterpMode                     interp_mode_ = InterpMode::LINEAR;
-
-    // Evaluate the speed at arc length s (clamped to the profile's [first, last] range).
-    double EvaluateSpeed(double s) const;
-
-    // Insert a new point so that points_ stays ordered by s. Returns the index it was inserted at.
-    int InsertPoint(double s, double speed);
-
-    // Remove the point at index (no-op if index is out of range).
-    void RemovePoint(int index);
-
-    // Numerically integrate ds / v(s) from 0 to s (used to drive the ghost preview animation, see
-    // Trajectory_Editing.md section 9.3). Very low speeds are clamped to avoid divide-by-zero.
-    double EvaluateTimeAtS(double s) const;
-
-    // Inverse of EvaluateTimeAtS: given an elapsed time, find the corresponding arc length s.
-    double EvaluateSAtTime(double t) const;
-};
-
-// A time keyframe constraint on a trajectory: "at time t, the vehicle should be at arc length s along the
-// path" (Trajectory_Editing_Enhancement.md). Only (t, s) is persisted; the world position is derived from
-// path_.Evaluate(s) at render time. achieved_t/feasible are solver outputs refreshed by ResolveKeyframes().
-struct TrajectoryKeyframe
-{
-    double t = 0.0;  // desired arrival time, seconds
-    double s = 0.0;  // position along the owning EntityPath's arc length
-
-    // Solve results (not persisted): the arrival time actually achievable after the last resolve. When the
-    // constraint cannot be met exactly (speed/acceleration limits), feasible is false and achieved_t tells
-    // the user what the clamped outcome is (P4 in Trajectory_Editing_Enhancement.md section 4).
-    double achieved_t = 0.0;
-    bool   feasible   = true;
-};
+// SpeedProfilePoint / EntitySpeedProfile / TrajectoryKeyframe and the keyframe solver live in
+// TrajectorySolver.hpp - a self-contained, UI/OSG-free module so the solver is unit-testable headlessly
+// (Trajectory_Editing_Enhancement.md section 12).
 
 // Binds together the path and speed profile of a single trajectory-editor-only vehicle. Such vehicles are
 // created via the "Add Trajectory" interaction (Trajectory_Editing.md section 6) and never correspond to any
@@ -200,7 +153,7 @@ public:
     EntitySpeedProfile  speed_profile_;
 
     // Time keyframes sorted by t (Trajectory_Editing_Enhancement.md): user-specified arrival-time constraints
-    // that ResolveKeyframes() turns into speed profile modifications via the P0-P4 cascade.
+    // that ResolveKeyframes() turns into speed profile modifications via the Q0-Q3 cascade.
     std::vector<TrajectoryKeyframe> keyframes_;
 
     bool HasPath() const
@@ -221,17 +174,24 @@ public:
             speed_profile_.points_.back().s = path_.GetTotalLength();
     }
 
-    // Re-solve all keyframe constraints against the current path/speed profile, mutating speed_profile_ via
-    // the minimal-intrusion cascade (Trajectory_Editing_Enhancement.md section 4: P0 precheck -> P1 scale
-    // existing nodes, no new points -> P2a insert one midpoint -> P2b accel-limited trapezoid, <=2 points ->
-    // P4 clamp + residual). Also clamps each keyframe's s into [0, path length] (the auto-re-solve semantics
-    // for later path geometry edits) and refreshes achieved_t/feasible on every keyframe.
-    void ResolveKeyframes();
+    // Re-solve all keyframe constraints against the current path/speed profile via the v2 cascade
+    // (SolveKeyframeChain(), Trajectory_Editing_Enhancement.md section 12): pin-node invariant, Q0 physical
+    // window precheck, Q1 adjust-existing-nodes-only, insertion-gain gate, Q2 free-terminal construction with
+    // 5s spacing merge, Q3 clamp + residual.
+    void ResolveKeyframes()
+    {
+        SyncSpeedProfileEndpoints();
+        SolveKeyframeChain(speed_profile_, keyframes_, path_.GetTotalLength());
+    }
 
-private:
-    // Solve a single inter-keyframe segment [s_a, s_b] so the travel time becomes target_dt. Returns the
-    // actually achieved travel time (== target_dt when the constraint could be met exactly).
-    double SolveKeyframeSegment(double s_a, double s_b, double target_dt, bool* out_feasible);
+    // Remove keyframes_[index] together with its pin node, then re-solve the remaining chain.
+    void RemoveKeyframe(int index)
+    {
+        if (index < 0)
+            return;
+        SyncSpeedProfileEndpoints();
+        ::RemoveKeyframe(speed_profile_, keyframes_, static_cast<size_t>(index), path_.GetTotalLength());
+    }
 };
 
 // Derive the ".traj.json" sidecar path from a ".xosc" path, e.g. "scenario.xosc" -> "scenario.traj.json".

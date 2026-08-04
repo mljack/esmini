@@ -13,6 +13,7 @@ add_definitions(-DOSG_LIBRARY_STATIC)
 
 set(SOURCES
     StudioDataModel.cpp
+    TrajectorySolver.cpp
     OsgUtil.cpp
     PosUtil.cpp
     XmlUtil.cpp
@@ -23,6 +24,7 @@ set(SOURCES
 
 set(INCLUDES
     StudioDataModel.hpp
+    TrajectorySolver.hpp
     OsgUtil.hpp
     PosUtil.hpp
     XmlUtil.hpp
