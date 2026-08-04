@@ -453,3 +453,60 @@ $$t(s) = \int_0^s \frac{1}{v(s')}\,ds'$$
 2. **弹窗与逻辑独立实现**：`OpenAddTrajectoryDialog`/`HandleAddTrajectoryDialog` 是与 `OpenAddVehicleDialog`/`HandleAddVehicleDialog` 结构类似但完全独立的新代码，不直接复用/调用后者的函数（第 6.1 节）。
 3. **`Enter` 在 0 点时的行为**：直接忽略，不提交、不退出点选模式、不做提示（第 6.1 节）。
 4. **ghost marker 样式**：使用固定默认 `CatalogReference`（`resources/xosc/Catalogs/Vehicles/VehicleCatalog.xosc` 中的默认条目，例如 `car_white`），以其 OSGB 模型渲染，而不是纯色占位符（第 7.2 节）。
+
+---
+
+## 16. 开发过程问题排查记录
+
+本节记录 M1-M7 落地过程中实际遇到的、且排查过程本身有参考价值的问题：现象、尝试过的方案、该方案是否有效及原因、最终采用的方案。部分根因非常隐蔽（跨越 OSG 事件系统、ImGui 输入模型、ImPlot 内部实现），排查耗时较长，记录下来避免以后重复踩坑。
+
+### 16.1 3D 视图路径点 gizmo 渲染缺一角
+
+- **现象**：路径点的 gizmo（圆柱体/圆锥体）看起来像是缺了一块扇形，肉眼数出来只画了 11/12 个面。
+- **根因**：共享的 OSG 基础几何体生成函数 [OsgUtil.cpp](EnvironmentSimulator/Modules/StudioViewerBase/OsgUtil.cpp#L214) 里 `CreateRedCylinderGeometry`（顶/底两处圆面 fan 三角化，约 [L279-L289](EnvironmentSimulator/Modules/StudioViewerBase/OsgUtil.cpp#L279-L289)）与 `CreateYellowConeGeometry`（底面 fan 三角化）里，圆周采样循环写成 `for (int i = 1; i <= segments; i++)`、但 fan 的两条边用的是 `i` 和 `i + 1`，最后一段 `i == segments` 时 `i + 1` 会越界到"下一圈"还没画的顶点，实际效果是最后一个楔形三角形缺失。这是一个此前从未被暴露过的老 bug：在本功能之前，这两个函数生成的顶/底面从未在任何已渲染的场景里被真正用到过（此前的车辆标记只用到了侧面）。
+- **修复**：把圆周采样循环的顶点数组生成部分改为 `i <= segments`（已经是当前代码状态，顶点数组比 segments 多存一份首尾重合点），配合 fan 索引循环 `i` 从 1 到 `segments`，让最后一个三角形能正确引用到"重新回到起点"的顶点，闭合整个圆周。3 处（`CreateRedCylinderGeometry` 的顶、底两个 fan，`CreateYellowConeGeometry` 的底 fan）都需要同样修正。
+
+### 16.2 3D 视图路径点选中后无法拖动
+
+这是本功能里排查时间最长的问题，一共经历了三轮尝试，前两轮都只是缓解了相关的连带问题，第三轮才找到真正的根因。
+
+| 轮次 | 尝试的方案 | 是否解决"无法拖动" | 原因 |
+|---|---|---|---|
+| 第一轮 | 在 `HandleTrajectoryPointClick()` 开头补上 `UpdateMousePositionFromWorld()` 调用 | 否，但确有必要 | `hud_mouse_world_x_/y_` 平时只在每帧 `Render()` 里刷新一次；`HandleTrajectoryPointClick()` 是从 `handle()`（OSG 事件回调，触发时机独立于渲染帧）里调用的，点击瞬间读到的是上一帧的鼠标位置，命中测试本身不准。这个问题是真实存在的，修了之后点选更准了，但和"选中后完全无法拖动"是两个不同的 bug |
+| 第二轮 | 把"先单击选中、再单独点击已选中的 gizmo 才开始拖动"的两步交互，合并成"点击即选中并在同一次按下里武装拖动"（见 [StudioGui.cpp](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L1717) `HandleTrajectoryPointClick()`） | 否，但去掉了一个可能被误认为"没反应"的干扰因素 | 原设计要求"点击选中"和"点击拖动"是两次分开的按下事件，如果用户按照直觉做"按下即拖动"的连续动作，第一次按下只会选中、不会拖动，容易被误判为"拖不动"。合并成一次动作后，至少交互模型本身不再有额外的门槛，但拖动依然没有效果，说明还有更底层的问题 |
+| 第三轮（根因） | 追查 `UpdateTrajectoryPointDrag()` 增量计算所依赖的鼠标世界坐标的刷新时机 | **是** | `hud_mouse_world_x_/y_` 最终来自 `StudioViewer::GetMousePosition()` → `TopViewManipulator::getMousePos()` → 内部成员 `mousePos_`。[TopViewManipulator.cpp](EnvironmentSimulator/Modules/StudioViewerBase/TopViewManipulator.cpp#L136) 里 `mousePos_` 只在事件类型是 `MOVE \| PUSH \| RELEASE` 时才会被刷新，**唯独漏了 `DRAG`**——也就是说，左键按住拖动的整个过程中（每次移动都是 `DRAG` 事件），`mousePos_` 从未被更新过，一直冻结在鼠标刚按下那一刻的值。`UpdateTrajectoryPointDrag()` 用"当前鼠标世界坐标 - 拖动起点鼠标世界坐标"算增量，既然当前值和起点值实际上是同一个被冻结的数字，增量恒为 0，点位自然纹丝不动。选中之所以能生效，是因为选中只在 `PUSH` 那一帧读一次 `mousePos_`（此时它刚好是新鲜的），后续不再依赖它 |
+
+- **最终修复**：在 `TopViewManipulator::handle()` 顶部的事件类型掩码里补上 `GUIEventAdapter::DRAG`，让 `mousePos_` 在拖动过程中每一帧都能正确刷新。这是一个只有几个字符的改动，但因为影响面是"任何依赖 `GetMousePosition()` 做世界坐标增量计算的新功能"，具有一定的普遍性，已记录到仓库记忆（`/memories/repo/build.md`）中防止未来重复踩坑。
+
+### 16.3 Speed Profile 图表双击手势不可靠，最终改为右键菜单
+
+| 轮次 | 尝试的方案 | 是否有效 | 原因 |
+|---|---|---|---|
+| 第一轮 | 怀疑双击插入"需要精确点在线上"是因为 `ImPlot::DragPoint` 的命中区域抢占了点击，改用手动像素级命中测试（`ImPlot::PlotToPixels` + 鼠标屏幕坐标）代替 `ImPlot::IsPlotHovered()` 判断是否悬停在图表内 | 部分改进，未解决根本问题 | 插入逻辑本身确实从未有过"必须靠近曲线"的容差限制，这一步排查方向不完全对，但改用手动像素命中测试让后续的选中/删除手势判定更可靠，属于顺带的正确改进 |
+| 第二轮 | 用户手动把 `io.MouseDoubleClickMaxDist` 从默认 6px 调到 2,000,000（约等于取消距离限制），验证是否是距离容差导致 | **证伪了距离容差假说** | 调到近乎无穷大后问题依旧，说明双击判定失败与"两次点击隔多远"无关，促使排查转向 ImGui 输入模型本身 |
+| —（根因） | 排查 `StudioGui` 向 ImGui 喂鼠标按键状态的方式 | — | `handle()`（OSG 事件回调）只是把 `left/right_mouse_pressed_` 设成当前按键位掩码，真正写入 `io.MouseDown[]` 是在 `NewFrame()` 里**每渲染帧整体赋值一次**（"快照式"，而不是 `io.AddMouseButtonEvent()` 那种逐事件排队的模型）。双击的按下-抬起-按下如果全部发生在两次渲染帧之间（帧率不够高、或双击速度较快时很容易发生），中间的抬起/再按下这一组边沿会被直接吞掉，`ImGui::IsMouseDoubleClicked()` 因此测不到，且是否发生完全取决于点击时机与帧边界的相对关系——这正是"时好时坏"的表现，与 `io.MouseDoubleClickMaxDist` 无关 |
+| 第三轮 | 绕开 `ImGui::IsMouseDoubleClicked()`，改为在 `handle()` 的 `PUSH` 事件里直接用 OSG 原始事件时间戳 `ea.getTime()` 自己配对连续两次按下（每次物理按下都会触发一次 `PUSH`，不受渲染帧率影响） | 用户反馈仍不能稳定按预期工作 | 未能进一步定位为什么这个方案依然不稳定（可能与"按下"事件本身在某些输入设备/驱动下的抖动、或与其他 UI 交互抢事件有关，未继续深挖） |
+| 最终方案 | **彻底放弃双击手势**，改为右键单击弹出 `Insert Point`/`Delete Point` 菜单：右键点在已有点上只提供 `Delete Point`，右键点在空白处只提供 `Insert Point`（[StudioGui.cpp](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L1817) 附近的图表右键处理、[L2056](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2056) 起的 `SpeedProfileContextMenu`） | **有效** | 单击（无论左右键）只需要检测一次按下沿，不存在"两次按下都要落在同一渲染帧窗口内才能配对成功"的问题，从架构上避开了整个雷区 |
+
+紧接着右键菜单方案又暴露了一个新问题：
+
+- **现象**：右键点击后菜单完全不弹出（既不是位置不对，是彻底没反应）。
+- **根因**：`ImPlot::BeginPlot()`/`EndPlot()` 内部会用 `ImGui::BeginChild()` 之类的机制开辟一个独立的绘图子窗口，从而 push 了一层它自己的 ID 作用域。右键检测（调用 `ImGui::OpenPopup("SpeedProfileContextMenu")`，见 [L2056](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2056)）写在 `BeginPlot`/`EndPlot` 内部，而 `ImGui::BeginPopup("SpeedProfileContextMenu")` 最初被放在了 `EndPlot()` **之后**（也就回到了外层、没有 ImPlot 子窗口那层 ID 作用域的上下文）。两次调用虽然用的是同一个字符串，但由于当前 ID 栈不同，`ImGui::GetID()` 算出来的实际 ID 并不相等，`BeginPopup` 永远找不到 `OpenPopup` 注册的那个打开请求。
+- **修复**：把 `BeginPopup("SpeedProfileContextMenu")`/`EndPopup()` 整体挪回 `EndPlot()` **之前**（见 [L2094](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L2094) 起），与 `OpenPopup` 处于同一个 ID 作用域下。这个坑同样需要注意：**任何在 `ImPlot::BeginPlot()/EndPlot()` 内部触发的 `OpenPopup`，其 `BeginPopup` 也必须写在同一对 `BeginPlot/EndPlot` 之内**，不能挪到外面。
+
+### 16.4 3D 视图路径点右键 Delete/Insert Point（在前两个问题解决后新增）
+
+在 16.2 节的拖动 bug 修复、16.3 节的右键菜单模式跑通之后，为 3D 视图的路径点补充了同样的右键交互，复用了完全相同的设计经验（单击/右键而非双击，`OpenPopup`/`BeginPopup` 配对）：
+
+- 新增 `EntityPath::FindNearestPositionOnPath()`（[StudioDataModel.cpp](EnvironmentSimulator/Modules/StudioViewerBase/StudioDataModel.cpp#L2390)），把点投影到控制点折线（与 `InsertPoint()` 自身排序用的折线弧长口径一致）最近的线段上，用于"右键点在路径附近"时判断能否插入、以及插入应该用的 `s` 值。
+- 新增 `HandleTrajectoryPointRightClick()`，在 `handle()` 的右键松开分支里优先尝试命中路径点/路径，命中则弹出对应菜单，否则才退回原有的 xosc 实体 Move/Add Vehicle 菜单逻辑，两套菜单互不干扰。
+- 由于 `OpenPopup`/`BeginPopup` 这次都写在 `HandleViewportContextMenu()` 里、不涉及 ImPlot 子窗口，不存在 16.3 节的 ID 作用域问题，一次性做对。
+
+### 16.5 经验教训小结
+
+1. **不要相信"看起来很像"的假设，先证伪再深挖**：双击容差（`io.MouseDoubleClickMaxDist`）看起来最像"点击需要精确"的解释，但花一次实验（调到 2,000,000）就能直接证伪，避免在错误方向上继续微调参数。
+2. **任何"用当前值减起始值算增量"的拖拽/手势逻辑，都要先确认这两个值的数据源在你关心的事件类型下真的会刷新**——`TopViewManipulator::mousePos_` 只在 `MOVE/PUSH/RELEASE` 刷新、漏了 `DRAG`，是那种"看起来交互逻辑完全正确、实际上底层数据从未更新过"的典型陷阱，单看调用拖拽逻辑的那部分代码完全看不出问题。
+3. **这套代码库里应尽量避免依赖 `ImGui::IsMouseDoubleClicked()` 等双击/多击检测**：`StudioGui` 对鼠标按键状态是"每渲染帧整体赋值一次"的快照式输入，而非逐事件排队，双击这种"要求两次按下落在同一个短时间窗口"的手势在这个模型下天然不可靠。优先用单击、右键菜单等只需要单次按下沿检测的交互方式。
+4. **`ImPlot::BeginPlot()`/`EndPlot()` 会开辟独立的 ID 作用域**：在其内部发起的 `ImGui::OpenPopup()`，对应的 `ImGui::BeginPopup()` 必须写在同一对 `BeginPlot`/`EndPlot` 之内，不能等到 `EndPlot()` 之后再处理，否则 ID 对不上、弹窗永远打不开。
+5. **共享的基础绘图函数（如 `OsgUtil.cpp` 里的圆柱/圆锥体生成）即使"看起来一直在用"，也可能有从未被真正渲染路径覆盖到的分支（如顶/底面）藏着长期未暴露的 bug**，一旦新功能第一次真正用到这些分支，旧 bug 才会暴露出来。
+
