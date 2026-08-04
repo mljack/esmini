@@ -1746,14 +1746,6 @@ void StudioGui::EndTrajectoryPointDrag()
 
 void StudioGui::RenderTrajectoriesTab()
 {
-    // Consume this frame's pending double-clicks (set from raw OSG PUSH events in handle(), see
-    // StudioGui.hpp) exactly once here, regardless of how many entities' charts are below - whichever
-    // entity's plot the mouse is actually over when we get to it claims it.
-    bool left_dblclick_this_frame  = speed_chart_left_dblclick_pending_;
-    bool right_dblclick_this_frame = speed_chart_right_dblclick_pending_;
-    speed_chart_left_dblclick_pending_  = false;
-    speed_chart_right_dblclick_pending_ = false;
-
     if (data_model_.entity_trajectories_.empty())
     {
         ImGui::TextDisabled("No trajectories yet. Right-click the map view and choose 'Add Trajectory'.");
@@ -1806,9 +1798,9 @@ void StudioGui::RenderTrajectoriesTab()
 
             ImGui::TextDisabled("Click a point to select it (turns red; its row below highlights too).");
             ImGui::TextDisabled("Drag the selected point to change its speed; hold Ctrl to also change s.");
-            ImGui::TextDisabled("Double-click anywhere to insert a point. Double-right-click a point to delete it.");
-            // NoMenus: disable ImPlot's own right-click context menu, which otherwise intercepts right clicks
-            // (opening its axis/fit menu) instead of letting our right-double-click-to-delete gesture see them.
+            ImGui::TextDisabled("Right-click a point to delete it, or right-click empty space to insert one.");
+            // NoMenus: disable ImPlot's own right-click context menu (axis/fit options), which would otherwise
+            // intercept right clicks instead of letting our own Insert/Delete Point menu see them.
             if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
@@ -1903,35 +1895,16 @@ void StudioGui::RenderTrajectoriesTab()
 
                 if (mouse_in_plot)
                 {
-                    if (left_dblclick_this_frame)
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
                     {
-                        // No proximity requirement: double-clicking anywhere in the plot inserts a point there.
-                        // Claim the pending double-click so no other entity's plot also reacts to it.
-                        left_dblclick_this_frame = false;
-                        ImPlotPoint mouse        = ImPlot::GetPlotMousePos();
-                        traj.speed_profile_.InsertPoint(std::min(s_axis_max, std::max(0.0, mouse.x)),
-                                                        std::min(kSpeedAxisMax, std::max(0.0, mouse.y)));
-                        profile_changed = true;
-                        if (speed_selected_entity_name_ == name)
-                        {
-                            speed_point_selected_       = false;
-                            speed_selected_point_index_ = -1;
-                        }
-                    }
-                    else if (right_dblclick_this_frame)
-                    {
-                        right_dblclick_this_frame = false;
-                        int idx = find_nearest_pixel(10.0);
-                        if (idx > 0 && idx < static_cast<int>(xs.size()) - 1)  // never the start/end anchors
-                        {
-                            traj.speed_profile_.RemovePoint(idx);
-                            profile_changed = true;
-                            if (speed_selected_entity_name_ == name)
-                            {
-                                speed_point_selected_       = false;
-                                speed_selected_point_index_ = -1;
-                            }
-                        }
+                        // Remember which point (if any) was right-clicked and where, then defer the actual
+                        // insert/delete to the popup below: it can only run once ImGui confirms the menu
+                        // choice, possibly several frames later.
+                        speed_context_point_index_ = find_nearest_pixel(10.0);
+                        ImPlotPoint mp              = ImPlot::GetPlotMousePos();
+                        speed_context_insert_s_     = std::min(s_axis_max, std::max(0.0, mp.x));
+                        speed_context_insert_speed_ = std::min(kSpeedAxisMax, std::max(0.0, mp.y));
+                        ImGui::OpenPopup("SpeedProfileContextMenu");
                     }
                     else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                     {
@@ -1965,12 +1938,56 @@ void StudioGui::RenderTrajectoriesTab()
 
                 ImPlot::EndPlot();
 
+                // Insert Point / Delete Point context menu (Trajectory_Editing.md 8.2), populated from the
+                // right-click above. Scoped under this entity's PushID(name), so each entity's plot gets its
+                // own independent popup instance.
+                if (ImGui::BeginPopup("SpeedProfileContextMenu"))
+                {
+                    bool clicked_on_point = speed_context_point_index_ >= 0;
+                    bool clicked_on_anchor = clicked_on_point &&
+                                            (speed_context_point_index_ == 0 ||
+                                             speed_context_point_index_ == static_cast<int>(traj.speed_profile_.points_.size()) - 1);
+
+                    if (clicked_on_point)
+                    {
+                        if (clicked_on_anchor)
+                        {
+                            ImGui::BeginDisabled(true);
+                            ImGui::MenuItem("Delete Point (start/end anchor, fixed)");
+                            ImGui::EndDisabled();
+                        }
+                        else if (ImGui::MenuItem("Delete Point"))
+                        {
+                            traj.speed_profile_.RemovePoint(speed_context_point_index_);
+                            profile_changed = true;
+                            if (speed_selected_entity_name_ == name && speed_selected_point_index_ == speed_context_point_index_)
+                            {
+                                speed_point_selected_       = false;
+                                speed_selected_point_index_ = -1;
+                                speed_selected_entity_name_.clear();
+                            }
+                        }
+                    }
+                    else if (ImGui::MenuItem("Insert Point"))
+                    {
+                        traj.speed_profile_.InsertPoint(speed_context_insert_s_, speed_context_insert_speed_);
+                        profile_changed = true;
+                        if (speed_selected_entity_name_ == name)
+                        {
+                            speed_point_selected_       = false;
+                            speed_selected_point_index_ = -1;
+                            speed_selected_entity_name_.clear();
+                        }
+                    }
+                    ImGui::EndPopup();
+                }
+
                 // Skip re-sorting/anchor-sync while a Ctrl-drag is actively moving this point's s, so the
                 // point's index stays stable across frames for the drag above; it's finalized on release
                 // (the frame speed_point_drag_active_ turns false, which happens before this check runs).
                 if (profile_changed && !(speed_point_drag_active_ && this_is_drag_target))
                 {
-                    // A double-click insert (or an out-of-order Ctrl-drag) could leave points_ unsorted;
+                    // An Insert Point (or an out-of-order Ctrl-drag) could leave points_ unsorted;
                     // EvaluateSpeed() assumes ascending s, so restore that invariant after any edit.
                     std::sort(traj.speed_profile_.points_.begin(),
                              traj.speed_profile_.points_.end(),
@@ -2770,40 +2787,6 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             left_mouse_pressed_   = ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON;
             right_mouse_pressed_  = ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON;
             middle_mouse_pressed_ = ea.getButtonMask() & osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON;
-
-            // Pair up presses for the speed profile chart's double-click gestures directly from raw OSG PUSH
-            // events (see the member declarations in StudioGui.hpp for why ImGui::IsMouseDoubleClicked() is
-            // not reliable here). Only PUSH events (not RELEASE) count as a "press".
-            if (ea.getEventType() == osgGA::GUIEventAdapter::PUSH)
-            {
-                const double kDoubleClickSeconds = 0.4;
-                double       now                 = ea.getTime();
-
-                if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
-                {
-                    if (last_left_press_time_ >= 0.0 && (now - last_left_press_time_) <= kDoubleClickSeconds)
-                    {
-                        speed_chart_left_dblclick_pending_ = true;
-                        last_left_press_time_              = -1.0;  // consumed: don't chain into a triple-click
-                    }
-                    else
-                    {
-                        last_left_press_time_ = now;
-                    }
-                }
-                if (ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
-                {
-                    if (last_right_press_time_ >= 0.0 && (now - last_right_press_time_) <= kDoubleClickSeconds)
-                    {
-                        speed_chart_right_dblclick_pending_ = true;
-                        last_right_press_time_              = -1.0;
-                    }
-                    else
-                    {
-                        last_right_press_time_ = now;
-                    }
-                }
-            }
 
             // Handle mouse click events for vehicle/object picking
             if (!wantCaptureMouse && ea.getEventType() == osgGA::GUIEventAdapter::PUSH)

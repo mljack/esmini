@@ -172,16 +172,14 @@ private:
     float right_press_x_         = 0.0f;
     float right_press_y_         = 0.0f;
 
-    // Custom double-click detection for the speed profile chart (Trajectory_Editing.md 8.2), driven directly
-    // by raw OSG PUSH events rather than ImGui::IsMouseDoubleClicked(): the latter samples io.MouseDown[] once
-    // per RENDERED frame (see NewFrame()), so a fast double-click whose press-release-press sequence all
-    // happens between two rendered frames is silently collapsed/missed - unreliable regardless of
-    // io.MouseDoubleClickMaxDist. OSG delivers a PUSH event for every physical press regardless of frame rate,
-    // so pairing up presses here is immune to that. last_*_press_time_ < 0 means "no press awaiting a pair".
-    double last_left_press_time_               = -1.0;
-    double last_right_press_time_              = -1.0;
-    bool   speed_chart_left_dblclick_pending_  = false;
-    bool   speed_chart_right_dblclick_pending_ = false;
+    // Speed profile chart right-click context menu (Trajectory_Editing.md 8.2): right-clicking a point offers
+    // "Delete Point", right-clicking empty space offers "Insert Point" at that location. Double-click gestures
+    // were dropped for this (ImGui::IsMouseDoubleClicked() proved unreliable: it samples io.MouseDown[] once
+    // per rendered frame, so a fast double-click landing entirely between two frames is silently missed,
+    // regardless of io.MouseDoubleClickMaxDist). A plain right-click doesn't have that problem.
+    int    speed_context_point_index_  = -1;   // index right-clicked, or -1 if the click landed on empty space
+    double speed_context_insert_s_     = 0.0;  // plot-space position of the right-click, for "Insert Point"
+    double speed_context_insert_speed_ = 0.0;
 
     // Viewport "Add Vehicle" context menu and modal dialog state
     bool                     add_vehicle_context_menu_to_open_ = false;
