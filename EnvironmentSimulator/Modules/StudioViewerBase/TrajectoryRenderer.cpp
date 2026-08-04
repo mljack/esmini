@@ -35,7 +35,7 @@ const char* kDefaultVehicleEntry   = "car_white";
 const osg::Vec4 kPathLineColor      = osg::Vec4(1.0f, 0.55f, 0.0f, 1.0f);  // orange, distinct from the cyan XML-driven trajectory lines
 const osg::Vec4 kPreviewLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 0.6f);  // same hue, only used for the not-yet-committed last segment
 const double    kLineZOffset        = 0.2;
-const double    kVertexMarkerRadius = 0.3;
+const double    kVertexMarkerRadius = 0.6;
 const double    kGizmoRadius        = 1.2;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
 const double    kKeyframeMarkerSize = 1.6;  // keyframe "diamond" (a box yawed 45 deg reads as a diamond in the top-down view)
 
@@ -236,24 +236,19 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         group->addChild(tx.get());
     }
 
-    // Keyframe markers (Trajectory_Editing_Enhancement.md 7.4): a 45-degree-yawed box ("diamond" from the
-    // top-down view) at each keyframe's position on the path; infeasible (clamped) keyframes get a red
-    // cylinder instead so conflicts are visible at a glance.
+    // Keyframe markers (Trajectory_Editing_Enhancement.md 7.4): a 45-degree-yawed blue box ("diamond" from
+    // the top-down view) at each keyframe's position on the path. Always a blue diamond - never a red
+    // cylinder - so keyframes can not be confused with the selected path point's red gizmo; the clamped
+    // (infeasible) state is signalled by the Keyframes table status column and the red reference line in the
+    // speed profile chart instead.
     for (const auto& kf : traj.keyframes_)
     {
         EntityPose kf_pose = traj.path_.Evaluate(kf.s);
 
         osg::ref_ptr<osg::PositionAttitudeTransform> kf_tx = new osg::PositionAttitudeTransform();
         kf_tx->setPosition(osg::Vec3(static_cast<float>(kf_pose.x), static_cast<float>(kf_pose.y), static_cast<float>(kf_pose.z + kLineZOffset)));
-        if (kf.feasible)
-        {
-            kf_tx->setAttitude(osg::Quat(M_PI / 4.0, osg::Vec3(0.0, 0.0, 1.0)));
-            kf_tx->addChild(CreateBlueBoxGeometry(kKeyframeMarkerSize, kKeyframeMarkerSize, kKeyframeMarkerSize));
-        }
-        else
-        {
-            kf_tx->addChild(CreateRedCylinderGeometry(kKeyframeMarkerSize * 0.5, kKeyframeMarkerSize, 12));
-        }
+        kf_tx->setAttitude(osg::Quat(M_PI / 4.0, osg::Vec3(0.0, 0.0, 1.0)));
+        kf_tx->addChild(CreateBlueBoxGeometry(kKeyframeMarkerSize, kKeyframeMarkerSize, kKeyframeMarkerSize));
         group->addChild(kf_tx.get());
     }
 
