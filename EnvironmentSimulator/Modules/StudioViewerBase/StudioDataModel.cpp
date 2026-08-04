@@ -2281,7 +2281,10 @@ void EntityPath::BuildFineSamples(std::vector<EntityPose>* out_poses, std::vecto
     // modes are approximated by a fine polyline. True clothoid fitting is not implemented yet, so CLOTHOID
     // currently falls back to the same Catmull-Rom approximation as "Spline" (see Trajectory_Editing.md 9.1/9.4
     // for the plan to reuse RoadManager's clothoid infrastructure instead, in a later iteration).
-    const int steps_per_segment = (interp_mode_ == InterpMode::LINEAR) ? 1 : 16;
+    // With fewer than 3 points there isn't enough information for the curve to bend away from a straight line
+    // anyway (Catmull-Rom with clamped neighbors degenerates to a straight segment), so render it as an
+    // explicit polyline instead of spending 16 substeps on what is geometrically a single straight line.
+    const int steps_per_segment = (interp_mode_ == InterpMode::LINEAR || points_.size() < 3) ? 1 : 16;
 
     out_poses->push_back(points_.front());
     out_cumulative_s->push_back(0.0);

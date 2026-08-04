@@ -43,6 +43,11 @@ public:
     // Drop a per-entity visualization entirely (e.g. after RemoveEntityTrajectory()).
     void RemoveEntity(const std::string& entity_name);
 
+    // Highlight one path point with a distinct "gizmo" marker so a selected-but-not-yet-dragged point is
+    // clearly distinguishable from a plain vertex (Trajectory_Editing.md 7.4: click selects, a further
+    // click-drag on the gizmo is what actually moves it). Pass an empty entity_name / index -1 to clear.
+    void SetSelectedPoint(const std::string& entity_name, int point_index);
+
     // While a new trajectory is being picked (Trajectory_Editing.md section 6.1), draw the already-confirmed
     // points plus a rubber-band preview line to the current mouse position. Call every frame while picking is
     // active; call ClearPickingPreview() once the interaction ends (committed or cancelled).
@@ -55,6 +60,9 @@ private:
 
     std::map<std::string, osg::ref_ptr<osg::Group>> per_entity_groups_;
     std::map<std::string, bool>                      dirty_flags_;
+
+    std::string selected_entity_name_;
+    int         selected_point_index_ = -1;
 
     // Shared default vehicle model used for every ghost marker (Trajectory_Editing.md section 7.2): trajectory-
     // editor-only vehicles have no xosc CatalogReference, so a single fixed VehicleCatalog.xosc entry is used

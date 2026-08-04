@@ -132,8 +132,10 @@ private:
     void FinishTrajectoryPicking();
     void CancelTrajectoryPickingPoint();
 
-    // Dragging an existing path point in the map view (Trajectory_Editing.md section 7.4 / 6.3).
-    bool StartTrajectoryPointDrag();
+    // Dragging an existing path point in the map view (Trajectory_Editing.md section 7.4 / 6.3). A click only
+    // selects/highlights the nearest point (shows a gizmo); a further click-drag starting on the already-
+    // selected point's gizmo is what actually moves it, so a plain click never modifies the trajectory.
+    bool HandleTrajectoryPointClick();
     void UpdateTrajectoryPointDrag();
     void EndTrajectoryPointDrag();
 
@@ -193,10 +195,20 @@ private:
     bool        trajectory_picking_active_ = false;
     std::string trajectory_picking_entity_name_;
 
+    // Selection state (section 7.4): a click selects/highlights a point without modifying anything; a further
+    // click-drag on the already-selected point is what actually moves it.
+    bool        trajectory_point_selected_        = false;
+    std::string trajectory_selected_entity_name_;
+    int         trajectory_selected_point_index_  = -1;
+
     // Path point dragging state (section 6.3 / 7.4).
     bool        trajectory_point_drag_active_ = false;
     std::string trajectory_drag_entity_name_;
     int         trajectory_drag_point_index_  = -1;
+
+    // Right panel ("XML Tree"/"Trajectories" tabs) defaults to the Trajectories tab once, on the first frame,
+    // without forcing it to stay selected afterwards.
+    bool right_panel_default_tab_applied_ = false;
 
     // Unsaved-changes-on-exit confirmation (section 5.4/13)
     bool exit_confirm_dialog_active_ = false;

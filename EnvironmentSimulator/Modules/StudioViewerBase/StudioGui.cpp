@@ -475,6 +475,8 @@ void StudioGui::Render(osg::RenderInfo&)
 
     // Trajectory-editor-only rendering (Trajectory_Editing.md section 7): independent of
     // viewer::StudioViewer/ScenarioPlayer's scene graph ownership, updated every frame in every mode.
+    trajectory_renderer_.SetSelectedPoint(trajectory_point_selected_ ? trajectory_selected_entity_name_ : std::string(),
+                                          trajectory_point_selected_ ? trajectory_selected_point_index_ : -1);
     trajectory_renderer_.Update(data_model_, data_model_.mode_, data_model_.virtual_time_);
     if (trajectory_picking_active_)
     {
@@ -533,7 +535,10 @@ void StudioGui::RenderXmlTree()
     ImGui::SetNextWindowSize(
         (ImVec2(data_model_.xml_panel_width_, data_model_.viewport_height_ - data_model_.menu_bar_height_ - data_model_.time_bar_height_)));
     ImGui::SetNextWindowBgAlpha(1.0f);
-    xml_panel_status = ImGui::Begin("XML Tree", nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+    xml_panel_status = ImGui::Begin("XML Tree",
+                                    nullptr,
+                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                                        ImGuiWindowFlags_NoTitleBar);
     if (xml_panel_status)
     {
         if (ImGui::BeginTabBar("RightPanelTabs"))
@@ -736,8 +741,11 @@ void StudioGui::RenderXmlTree()
         ImGui::EndTabItem();
         }
 
-        if (ImGui::BeginTabItem("Trajectories"))
+        if (ImGui::BeginTabItem("Trajectories",
+                                nullptr,
+                                right_panel_default_tab_applied_ ? ImGuiTabItemFlags_None : ImGuiTabItemFlags_SetSelected))
         {
+            right_panel_default_tab_applied_ = true;
             RenderTrajectoriesTab();
             ImGui::EndTabItem();
         }
@@ -1624,13 +1632,35 @@ void StudioGui::CancelTrajectoryPickingPoint()
     trajectory_renderer_.ClearPickingPreview();
 }
 
-bool StudioGui::StartTrajectoryPointDrag()
+bool StudioGui::HandleTrajectoryPointClick()
 {
-    const double kPickRadius = 2.0;  // meters, in the ground plane
+    const double kHitRadius = 2.0;  // meters, in the ground plane
 
+    // If a point is already selected, clicking on/near its gizmo again is what starts the drag - a plain
+    // click never modifies the trajectory (Trajectory_Editing.md 7.4).
+    if (trajectory_point_selected_)
+    {
+        auto it = data_model_.entity_trajectories_.find(trajectory_selected_entity_name_);
+        if (it != data_model_.entity_trajectories_.end() && trajectory_selected_point_index_ >= 0 &&
+            static_cast<size_t>(trajectory_selected_point_index_) < it->second.path_.points_.size())
+        {
+            const EntityPose& p  = it->second.path_.points_[static_cast<size_t>(trajectory_selected_point_index_)];
+            double            dx = p.x - hud_mouse_world_x_;
+            double            dy = p.y - hud_mouse_world_y_;
+            if (dx * dx + dy * dy <= kHitRadius * kHitRadius)
+            {
+                trajectory_point_drag_active_ = true;
+                trajectory_drag_entity_name_  = trajectory_selected_entity_name_;
+                trajectory_drag_point_index_  = trajectory_selected_point_index_;
+                return true;
+            }
+        }
+    }
+
+    // Otherwise, (re)select the nearest point across all entities, without starting a drag.
     std::string best_entity;
     int         best_index    = -1;
-    double      best_dist_sqr = kPickRadius * kPickRadius;
+    double      best_dist_sqr = kHitRadius * kHitRadius;
 
     for (auto& entry : data_model_.entity_trajectories_)
     {
@@ -1650,13 +1680,19 @@ bool StudioGui::StartTrajectoryPointDrag()
         }
     }
 
-    if (best_index < 0)
-        return false;
+    if (best_index >= 0)
+    {
+        trajectory_point_selected_        = true;
+        trajectory_selected_entity_name_  = best_entity;
+        trajectory_selected_point_index_  = best_index;
+        return true;  // consume the click: it selected a point, but did not modify anything
+    }
 
-    trajectory_point_drag_active_ = true;
-    trajectory_drag_entity_name_  = best_entity;
-    trajectory_drag_point_index_  = best_index;
-    return true;
+    // Clicked empty space: clear the selection and let the click fall through to the existing logic below.
+    trajectory_point_selected_ = false;
+    trajectory_selected_point_index_ = -1;
+    trajectory_selected_entity_name_.clear();
+    return false;
 }
 
 void StudioGui::UpdateTrajectoryPointDrag()
@@ -1731,7 +1767,10 @@ void StudioGui::RenderTrajectoriesTab()
             if (ImGui::Button("Delete"))
                 entity_to_delete = name;
 
-            // Speed Profile chart (Trajectory_Editing.md 8.2): X axis is arc length s, Y axis is speed.
+            // Speed Profile editing (Trajectory_Editing.md 8.2): a chart for quick/approximate graphical
+            // editing (drag existing points, double-click to insert one), plus a precise numeric table below
+            // it for exact values and for deleting points (the chart alone has no delete gesture).
+            ImGui::TextDisabled("Drag a point to move it, double-click the chart to insert one.");
             if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200)))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
@@ -1746,6 +1785,8 @@ void StudioGui::RenderTrajectoriesTab()
                     ys.push_back(sp.speed);
                 }
 
+                bool profile_changed = false;
+
                 if (!xs.empty())
                 {
                     ImPlot::PlotLine("speed", xs.data(), ys.data(), static_cast<int>(xs.size()));
@@ -1756,12 +1797,9 @@ void StudioGui::RenderTrajectoriesTab()
                         double y = ys[i];
                         if (ImPlot::DragPoint(static_cast<int>(i), &x, &y, ImVec4(1.0f, 0.55f, 0.0f, 1.0f), 6.0f))
                         {
-                            x = std::max(0.0, x);
-                            y = std::max(0.0, y);
-                            traj.speed_profile_.points_[i].s     = x;
-                            traj.speed_profile_.points_[i].speed = y;
-                            data_model_.trajectories_modified_   = true;
-                            trajectory_renderer_.MarkDirty(name);
+                            traj.speed_profile_.points_[i].s     = std::max(0.0, x);
+                            traj.speed_profile_.points_[i].speed = std::max(0.0, y);
+                            profile_changed                      = true;
                         }
                     }
                 }
@@ -1770,11 +1808,87 @@ void StudioGui::RenderTrajectoriesTab()
                 {
                     ImPlotPoint mouse = ImPlot::GetPlotMousePos();
                     traj.speed_profile_.InsertPoint(std::max(0.0, mouse.x), std::max(0.0, mouse.y));
-                    data_model_.trajectories_modified_ = true;
-                    trajectory_renderer_.MarkDirty(name);
+                    profile_changed = true;
                 }
 
                 ImPlot::EndPlot();
+
+                if (profile_changed)
+                {
+                    // Points may have been dragged past a neighbor; EvaluateSpeed() assumes points_ is sorted
+                    // ascending by s, so restore that invariant after any edit.
+                    std::sort(traj.speed_profile_.points_.begin(),
+                             traj.speed_profile_.points_.end(),
+                             [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
+                    data_model_.trajectories_modified_ = true;
+                    trajectory_renderer_.MarkDirty(name);
+                }
+            }
+
+            // Precise numeric editing table, and the only way to delete a speed profile point.
+            int point_to_delete = -1;
+            if (ImGui::BeginTable("##speed_profile_table", 3, ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("s (m)");
+                ImGui::TableSetupColumn("speed (m/s)");
+                ImGui::TableSetupColumn("");
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < traj.speed_profile_.points_.size(); i++)
+                {
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::TableNextRow();
+
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    float s_value = static_cast<float>(traj.speed_profile_.points_[i].s);
+                    if (ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f"))
+                    {
+                        traj.speed_profile_.points_[i].s   = std::max(0.0f, s_value);
+                        data_model_.trajectories_modified_ = true;
+                        trajectory_renderer_.MarkDirty(name);
+                    }
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    float speed_value = static_cast<float>(traj.speed_profile_.points_[i].speed);
+                    if (ImGui::InputFloat("##speed", &speed_value, 0.0f, 0.0f, "%.2f"))
+                    {
+                        traj.speed_profile_.points_[i].speed = std::max(0.0f, speed_value);
+                        data_model_.trajectories_modified_    = true;
+                        trajectory_renderer_.MarkDirty(name);
+                    }
+
+                    ImGui::TableSetColumnIndex(2);
+                    if (ImGui::SmallButton("Delete"))
+                        point_to_delete = static_cast<int>(i);
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+
+            if (point_to_delete >= 0)
+            {
+                traj.speed_profile_.RemovePoint(point_to_delete);
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+            }
+            else
+            {
+                // Re-sort after a numeric edit may have moved a point past a neighbor (see above).
+                std::sort(traj.speed_profile_.points_.begin(),
+                         traj.speed_profile_.points_.end(),
+                         [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
+            }
+
+            if (ImGui::Button("Add Point"))
+            {
+                double next_s     = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.back().s + 5.0;
+                double next_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.back().speed;
+                traj.speed_profile_.InsertPoint(next_s, next_speed);
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
             }
         }
         ImGui::PopID();
@@ -1786,6 +1900,12 @@ void StudioGui::RenderTrajectoriesTab()
         trajectory_renderer_.RemoveEntity(entity_to_delete);
         if (trajectory_picking_active_ && trajectory_picking_entity_name_ == entity_to_delete)
             trajectory_picking_active_ = false;
+        if (trajectory_point_selected_ && trajectory_selected_entity_name_ == entity_to_delete)
+        {
+            trajectory_point_selected_ = false;
+            trajectory_selected_point_index_ = -1;
+            trajectory_selected_entity_name_.clear();
+        }
     }
 }
 
@@ -2395,10 +2515,11 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                             // Continuous point-picking for a new trajectory (Trajectory_Editing.md 6.1)
                             CommitTrajectoryPickingPoint();
                         }
-                        else if (!heading_operation_active_ && !move_operation_active_ && StartTrajectoryPointDrag())
+                        else if (!heading_operation_active_ && !move_operation_active_ && HandleTrajectoryPointClick())
                         {
-                            // Clicked near an existing trajectory path point: start dragging it instead of
-                            // falling through to the xosc entity picking logic below (Trajectory_Editing.md 7.4).
+                            // Trajectory point selection/drag consumed the click (Trajectory_Editing.md 7.4):
+                            // either a point was just (re)selected, or the drag on an already-selected point's
+                            // gizmo just started. Either way, do not fall through to xosc entity picking below.
                         }
                         else if (heading_operation_active_)
                         {

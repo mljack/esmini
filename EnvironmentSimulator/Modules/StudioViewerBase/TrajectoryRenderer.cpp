@@ -30,10 +30,11 @@ namespace
 const char* kDefaultCatalogRelPath = "xosc/Catalogs/Vehicles/VehicleCatalog.xosc";
 const char* kDefaultVehicleEntry   = "car_white";
 
-const osg::Vec4 kPathLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 1.0f);  // orange, distinct from the cyan XML-driven trajectory lines
-const osg::Vec4 kPreviewLineColor = osg::Vec4(1.0f, 0.55f, 0.0f, 0.5f);
-const double    kLineZOffset       = 0.2;
+const osg::Vec4 kPathLineColor      = osg::Vec4(1.0f, 0.55f, 0.0f, 1.0f);  // orange, distinct from the cyan XML-driven trajectory lines
+const osg::Vec4 kPreviewLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 0.6f);  // same hue, only used for the not-yet-committed last segment
+const double    kLineZOffset        = 0.2;
 const double    kVertexMarkerRadius = 0.3;
+const double    kGizmoRadius        = 0.6;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
 
 osg::ref_ptr<osg::Node> BuildLineStripNode(const std::vector<osg::Vec3>& points, const osg::Vec4& color, float line_width)
 {
@@ -91,6 +92,12 @@ void EntityTrajectoryRenderer::RemoveEntity(const std::string& entity_name)
         per_entity_groups_.erase(it);
     }
     dirty_flags_.erase(entity_name);
+}
+
+void EntityTrajectoryRenderer::SetSelectedPoint(const std::string& entity_name, int point_index)
+{
+    selected_entity_name_  = entity_name;
+    selected_point_index_  = point_index;
 }
 
 osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::GetOrLoadGhostModel()
@@ -209,12 +216,20 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         group->addChild(BuildLineStripNode(line_points, kPathLineColor, 3.0f));
     }
 
-    // Vertex markers for the sparse, user-editable control points.
-    for (const auto& p : traj.path_.points_)
+    // Vertex markers for the sparse, user-editable control points. The selected point (if any, Trajectory_
+    // Editing.md 7.4) is drawn as a bigger, differently-shaped "gizmo" so it is unambiguous which point a
+    // subsequent click-drag would move, versus a plain click that only (re)selects a point.
+    for (size_t i = 0; i < traj.path_.points_.size(); i++)
     {
+        const EntityPose& p            = traj.path_.points_[i];
+        bool               is_selected = (entity_name == selected_entity_name_) && (static_cast<int>(i) == selected_point_index_);
+
         osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
         tx->setPosition(osg::Vec3(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset)));
-        tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
+        if (is_selected)
+            tx->addChild(CreateYellowConeGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
+        else
+            tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
         group->addChild(tx.get());
     }
 
@@ -275,11 +290,11 @@ void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose
     if (confirmed_points.empty())
         return;
 
-    std::vector<osg::Vec3> line_points;
-    line_points.reserve(confirmed_points.size() + 1);
-    for (const auto& p : confirmed_points)
-        line_points.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset));
-
+    // The confirmed points themselves are already drawn by Update()/RebuildEntityGroup() as part of the
+    // entity's own interpolated curve (it is committed directly into entity_trajectories_ as the user clicks,
+    // see StudioGui::CommitTrajectoryPickingPoint()). Re-drawing a straight polyline over all of them here
+    // would duplicate that line in the same color; only the not-yet-committed "last segment" to the mouse
+    // belongs to the preview.
     for (const auto& p : confirmed_points)
     {
         osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
@@ -288,11 +303,12 @@ void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose
         picking_preview_group_->addChild(tx.get());
     }
 
-    // Rubber-band preview segment from the last confirmed point to the current mouse position.
-    line_points.emplace_back(static_cast<float>(mouse_x), static_cast<float>(mouse_y), static_cast<float>(mouse_z + kLineZOffset));
-
-    if (line_points.size() >= 2)
-        picking_preview_group_->addChild(BuildLineStripNode(line_points, kPreviewLineColor, 2.0f));
+    const EntityPose&       last = confirmed_points.back();
+    std::vector<osg::Vec3> line_points = {
+        osg::Vec3(static_cast<float>(last.x),    static_cast<float>(last.y),    static_cast<float>(last.z + kLineZOffset)   ),
+        osg::Vec3(static_cast<float>(mouse_x), static_cast<float>(mouse_y), static_cast<float>(mouse_z + kLineZOffset))
+    };
+    picking_preview_group_->addChild(BuildLineStripNode(line_points, kPreviewLineColor, 2.0f));
 }
 
 void EntityTrajectoryRenderer::ClearPickingPreview()
