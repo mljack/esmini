@@ -1936,11 +1936,12 @@ void StudioGui::RenderTrajectoriesTab()
                     }
                 }
 
-                ImPlot::EndPlot();
-
                 // Insert Point / Delete Point context menu (Trajectory_Editing.md 8.2), populated from the
-                // right-click above. Scoped under this entity's PushID(name), so each entity's plot gets its
-                // own independent popup instance.
+                // right-click above. Must be opened/rendered while still inside BeginPlot()/EndPlot(): ImPlot's
+                // plot area is itself a child window, which pushes its own ID scope, so a BeginPopup() called
+                // only after EndPlot() would resolve to a DIFFERENT id than the OpenPopup() above (called
+                // while still inside the child) and would never actually find/open it. Scoped under this
+                // entity's PushID(name), so each entity's plot gets its own independent popup instance.
                 if (ImGui::BeginPopup("SpeedProfileContextMenu"))
                 {
                     bool clicked_on_point = speed_context_point_index_ >= 0;
@@ -1981,6 +1982,8 @@ void StudioGui::RenderTrajectoriesTab()
                     }
                     ImGui::EndPopup();
                 }
+
+                ImPlot::EndPlot();
 
                 // Skip re-sorting/anchor-sync while a Ctrl-drag is actively moving this point's s, so the
                 // point's index stays stable across frames for the drag above; it's finalized on release
