@@ -2315,6 +2315,39 @@ void EntityPath::BuildFineSamples(std::vector<EntityPose>* out_poses, std::vecto
             out_cumulative_s->push_back(out_cumulative_s->back() + d);
         }
     }
+
+    // Recompute heading from the curve's own tangent direction instead of the per-point stored h (which is
+    // aligned to the underlying road/lane at the moment the point was placed, not the shape of the path
+    // itself): a vehicle following this path should face along the curve, see Trajectory_Editing.md 9.3.
+    size_t sample_count = out_poses->size();
+    if (sample_count >= 2)
+    {
+        for (size_t i = 0; i < sample_count; i++)
+        {
+            double dx, dy;
+            if (i == 0)
+            {
+                dx = (*out_poses)[1].x - (*out_poses)[0].x;
+                dy = (*out_poses)[1].y - (*out_poses)[0].y;
+            }
+            else if (i == sample_count - 1)
+            {
+                dx = (*out_poses)[i].x - (*out_poses)[i - 1].x;
+                dy = (*out_poses)[i].y - (*out_poses)[i - 1].y;
+            }
+            else
+            {
+                // Central difference for a smoother tangent estimate away from the endpoints.
+                dx = (*out_poses)[i + 1].x - (*out_poses)[i - 1].x;
+                dy = (*out_poses)[i + 1].y - (*out_poses)[i - 1].y;
+            }
+
+            if (dx * dx + dy * dy > 1e-9)
+                (*out_poses)[i].h = std::atan2(dy, dx);
+            else if (i > 0)
+                (*out_poses)[i].h = (*out_poses)[i - 1].h;  // coincident samples: keep the previous heading
+        }
+    }
 }
 
 double EntityPath::GetTotalLength() const

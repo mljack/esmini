@@ -34,7 +34,7 @@ const osg::Vec4 kPathLineColor      = osg::Vec4(1.0f, 0.55f, 0.0f, 1.0f);  // or
 const osg::Vec4 kPreviewLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 0.6f);  // same hue, only used for the not-yet-committed last segment
 const double    kLineZOffset        = 0.2;
 const double    kVertexMarkerRadius = 0.3;
-const double    kGizmoRadius        = 0.6;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
+const double    kGizmoRadius        = 1.2;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
 
 osg::ref_ptr<osg::Node> BuildLineStripNode(const std::vector<osg::Vec3>& points, const osg::Vec4& color, float line_width)
 {
@@ -227,7 +227,7 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
         tx->setPosition(osg::Vec3(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset)));
         if (is_selected)
-            tx->addChild(CreateYellowConeGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
+            tx->addChild(CreateRedCylinderGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
         else
             tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
         group->addChild(tx.get());

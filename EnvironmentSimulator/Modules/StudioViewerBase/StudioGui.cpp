@@ -1649,9 +1649,13 @@ bool StudioGui::HandleTrajectoryPointClick()
             double            dy = p.y - hud_mouse_world_y_;
             if (dx * dx + dy * dy <= kHitRadius * kHitRadius)
             {
-                trajectory_point_drag_active_ = true;
-                trajectory_drag_entity_name_  = trajectory_selected_entity_name_;
-                trajectory_drag_point_index_  = trajectory_selected_point_index_;
+                trajectory_point_drag_active_  = true;
+                trajectory_drag_entity_name_   = trajectory_selected_entity_name_;
+                trajectory_drag_point_index_   = trajectory_selected_point_index_;
+                trajectory_drag_start_mouse_x_ = hud_mouse_world_x_;
+                trajectory_drag_start_mouse_y_ = hud_mouse_world_y_;
+                trajectory_drag_start_point_x_ = p.x;
+                trajectory_drag_start_point_y_ = p.y;
                 return true;
             }
         }
@@ -1710,10 +1714,14 @@ void StudioGui::UpdateTrajectoryPointDrag()
 
     UpdateMousePositionFromWorld();
 
+    // Move the point by the same amount the mouse has moved since the drag started (a "pan"), rather than
+    // snapping it straight to the cursor - this avoids a jump if the initial click wasn't exactly on the
+    // point (the hit-test tolerance in HandleTrajectoryPointClick() allows a couple of meters of slack).
     EntityPose& pose = it->second.path_.points_[static_cast<size_t>(trajectory_drag_point_index_)];
-    pose.x           = hud_mouse_world_x_;
-    pose.y           = hud_mouse_world_y_;
-    pose.z           = hud_mouse_world_z_;
+    double      dx   = hud_mouse_world_x_ - trajectory_drag_start_mouse_x_;
+    double      dy   = hud_mouse_world_y_ - trajectory_drag_start_mouse_y_;
+    pose.x           = trajectory_drag_start_point_x_ + dx;
+    pose.y           = trajectory_drag_start_point_y_ + dy;
     pose.SyncFromWorld(/*align_to_lane=*/true);
     pose.SyncFromLane();
 
@@ -1769,12 +1777,18 @@ void StudioGui::RenderTrajectoriesTab()
 
             // Speed Profile editing (Trajectory_Editing.md 8.2): a chart for quick/approximate graphical
             // editing (drag existing points, double-click to insert one), plus a precise numeric table below
-            // it for exact values and for deleting points (the chart alone has no delete gesture).
+            // it for exact values and for deleting points (the chart alone has no delete gesture). The s axis
+            // always auto-fits to the current path length and the speed axis is a fixed 0-25 m/s range, so
+            // box-select-to-zoom is disabled (it would fight the fixed/auto-fit ranges every frame anyway).
+            const double kSpeedAxisMax = 25.0;
+            double       s_axis_max    = std::max(1.0, length);
+
             ImGui::TextDisabled("Drag a point to move it, double-click the chart to insert one.");
-            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200)))
+            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
-                ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, std::max(1.0, length), ImGuiCond_Once);
+                ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, s_axis_max, ImGuiCond_Always);
+                ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, kSpeedAxisMax, ImGuiCond_Always);
 
                 std::vector<double> xs, ys;
                 xs.reserve(traj.speed_profile_.points_.size());
@@ -1797,8 +1811,8 @@ void StudioGui::RenderTrajectoriesTab()
                         double y = ys[i];
                         if (ImPlot::DragPoint(static_cast<int>(i), &x, &y, ImVec4(1.0f, 0.55f, 0.0f, 1.0f), 6.0f))
                         {
-                            traj.speed_profile_.points_[i].s     = std::max(0.0, x);
-                            traj.speed_profile_.points_[i].speed = std::max(0.0, y);
+                            traj.speed_profile_.points_[i].s     = std::min(s_axis_max, std::max(0.0, x));
+                            traj.speed_profile_.points_[i].speed = std::min(kSpeedAxisMax, std::max(0.0, y));
                             profile_changed                      = true;
                         }
                     }
@@ -1807,7 +1821,8 @@ void StudioGui::RenderTrajectoriesTab()
                 if (ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                 {
                     ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-                    traj.speed_profile_.InsertPoint(std::max(0.0, mouse.x), std::max(0.0, mouse.y));
+                    traj.speed_profile_.InsertPoint(std::min(s_axis_max, std::max(0.0, mouse.x)),
+                                                    std::min(kSpeedAxisMax, std::max(0.0, mouse.y)));
                     profile_changed = true;
                 }
 
@@ -1854,7 +1869,7 @@ void StudioGui::RenderTrajectoriesTab()
                     float speed_value = static_cast<float>(traj.speed_profile_.points_[i].speed);
                     if (ImGui::InputFloat("##speed", &speed_value, 0.0f, 0.0f, "%.2f"))
                     {
-                        traj.speed_profile_.points_[i].speed = std::max(0.0f, speed_value);
+                        traj.speed_profile_.points_[i].speed = std::min(static_cast<float>(kSpeedAxisMax), std::max(0.0f, speed_value));
                         data_model_.trajectories_modified_    = true;
                         trajectory_renderer_.MarkDirty(name);
                     }

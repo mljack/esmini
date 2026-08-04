@@ -201,10 +201,16 @@ private:
     std::string trajectory_selected_entity_name_;
     int         trajectory_selected_point_index_  = -1;
 
-    // Path point dragging state (section 6.3 / 7.4).
+    // Path point dragging state (section 6.3 / 7.4). The point is moved by the same delta the mouse moved
+    // since the drag started (not snapped straight to the cursor), so drag_start_* records both the mouse
+    // position and the point's original position at the moment the drag began.
     bool        trajectory_point_drag_active_ = false;
     std::string trajectory_drag_entity_name_;
     int         trajectory_drag_point_index_  = -1;
+    double      trajectory_drag_start_mouse_x_ = 0.0;
+    double      trajectory_drag_start_mouse_y_ = 0.0;
+    double      trajectory_drag_start_point_x_ = 0.0;
+    double      trajectory_drag_start_point_y_ = 0.0;
 
     // Right panel ("XML Tree"/"Trajectories" tabs) defaults to the Trajectories tab once, on the first frame,
     // without forcing it to stay selected afterwards.
