@@ -2022,7 +2022,15 @@ void StudioGui::RenderTrajectoriesTab()
                     }
                     else
                     {
+                        // Mouse released: end the drag. Also flag profile_changed on this exact frame (even
+                        // though no value changes here) so the commit-check below - which is skipped on every
+                        // in-progress drag frame - actually fires exactly once, right here, to finalize the
+                        // whole gesture into its own undo step. Without this, the drag's changes (already
+                        // applied to traj.speed_profile_.points_ on earlier frames) would never be pushed on
+                        // their own and would silently get bundled into whichever *next* edit happens to
+                        // trigger a commit (Trajectory_Editing.md section 11.5).
                         speed_point_drag_active_ = false;
+                        profile_changed          = true;
                     }
                 }
 
