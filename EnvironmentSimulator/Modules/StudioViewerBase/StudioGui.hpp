@@ -172,6 +172,17 @@ private:
     float right_press_x_         = 0.0f;
     float right_press_y_         = 0.0f;
 
+    // Custom double-click detection for the speed profile chart (Trajectory_Editing.md 8.2), driven directly
+    // by raw OSG PUSH events rather than ImGui::IsMouseDoubleClicked(): the latter samples io.MouseDown[] once
+    // per RENDERED frame (see NewFrame()), so a fast double-click whose press-release-press sequence all
+    // happens between two rendered frames is silently collapsed/missed - unreliable regardless of
+    // io.MouseDoubleClickMaxDist. OSG delivers a PUSH event for every physical press regardless of frame rate,
+    // so pairing up presses here is immune to that. last_*_press_time_ < 0 means "no press awaiting a pair".
+    double last_left_press_time_               = -1.0;
+    double last_right_press_time_              = -1.0;
+    bool   speed_chart_left_dblclick_pending_  = false;
+    bool   speed_chart_right_dblclick_pending_ = false;
+
     // Viewport "Add Vehicle" context menu and modal dialog state
     bool                     add_vehicle_context_menu_to_open_ = false;
     bool                     add_vehicle_dialog_to_open_       = false;

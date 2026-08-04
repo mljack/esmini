@@ -306,14 +306,6 @@ StudioGui::StudioGui(viewer::StudioViewer* viewer)
     io.IniFilename = NULL;
     io.LogFilename = NULL;
 
-    // ImGui's default double-click distance (6px) is too strict for the speed profile chart's double-click
-    // gestures (insert/delete a point): a real double-click's two presses easily land more than 6px apart,
-    // which silently fails IsMouseDoubleClicked() and is instead seen as two separate single clicks - each of
-    // which only visibly does something when it happens to land on an existing point, which felt like
-    // "double-click only registers when precisely on the line/point" even though there was no such proximity
-    // check in the insert/delete code itself.
-    io.MouseDoubleClickMaxDist = 20.0f;
-
     io.SetClipboardTextFn = SetClipboardText;
     io.GetClipboardTextFn = GetClipboardText;
     io.ClipboardUserData  = NULL;
@@ -1754,6 +1746,14 @@ void StudioGui::EndTrajectoryPointDrag()
 
 void StudioGui::RenderTrajectoriesTab()
 {
+    // Consume this frame's pending double-clicks (set from raw OSG PUSH events in handle(), see
+    // StudioGui.hpp) exactly once here, regardless of how many entities' charts are below - whichever
+    // entity's plot the mouse is actually over when we get to it claims it.
+    bool left_dblclick_this_frame  = speed_chart_left_dblclick_pending_;
+    bool right_dblclick_this_frame = speed_chart_right_dblclick_pending_;
+    speed_chart_left_dblclick_pending_  = false;
+    speed_chart_right_dblclick_pending_ = false;
+
     if (data_model_.entity_trajectories_.empty())
     {
         ImGui::TextDisabled("No trajectories yet. Right-click the map view and choose 'Add Trajectory'.");
@@ -1901,12 +1901,14 @@ void StudioGui::RenderTrajectoriesTab()
                     return best;
                 };
 
-                if (mouse_in_plot && !speed_point_drag_active_)
+                if (mouse_in_plot)
                 {
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    if (left_dblclick_this_frame)
                     {
                         // No proximity requirement: double-clicking anywhere in the plot inserts a point there.
-                        ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+                        // Claim the pending double-click so no other entity's plot also reacts to it.
+                        left_dblclick_this_frame = false;
+                        ImPlotPoint mouse        = ImPlot::GetPlotMousePos();
                         traj.speed_profile_.InsertPoint(std::min(s_axis_max, std::max(0.0, mouse.x)),
                                                         std::min(kSpeedAxisMax, std::max(0.0, mouse.y)));
                         profile_changed = true;
@@ -1916,8 +1918,9 @@ void StudioGui::RenderTrajectoriesTab()
                             speed_selected_point_index_ = -1;
                         }
                     }
-                    else if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Right))
+                    else if (right_dblclick_this_frame)
                     {
+                        right_dblclick_this_frame = false;
                         int idx = find_nearest_pixel(10.0);
                         if (idx > 0 && idx < static_cast<int>(xs.size()) - 1)  // never the start/end anchors
                         {
@@ -2767,6 +2770,40 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             left_mouse_pressed_   = ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON;
             right_mouse_pressed_  = ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON;
             middle_mouse_pressed_ = ea.getButtonMask() & osgGA::GUIEventAdapter::MIDDLE_MOUSE_BUTTON;
+
+            // Pair up presses for the speed profile chart's double-click gestures directly from raw OSG PUSH
+            // events (see the member declarations in StudioGui.hpp for why ImGui::IsMouseDoubleClicked() is
+            // not reliable here). Only PUSH events (not RELEASE) count as a "press".
+            if (ea.getEventType() == osgGA::GUIEventAdapter::PUSH)
+            {
+                const double kDoubleClickSeconds = 0.4;
+                double       now                 = ea.getTime();
+
+                if (ea.getButtonMask() & osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON)
+                {
+                    if (last_left_press_time_ >= 0.0 && (now - last_left_press_time_) <= kDoubleClickSeconds)
+                    {
+                        speed_chart_left_dblclick_pending_ = true;
+                        last_left_press_time_              = -1.0;  // consumed: don't chain into a triple-click
+                    }
+                    else
+                    {
+                        last_left_press_time_ = now;
+                    }
+                }
+                if (ea.getButtonMask() & osgGA::GUIEventAdapter::RIGHT_MOUSE_BUTTON)
+                {
+                    if (last_right_press_time_ >= 0.0 && (now - last_right_press_time_) <= kDoubleClickSeconds)
+                    {
+                        speed_chart_right_dblclick_pending_ = true;
+                        last_right_press_time_              = -1.0;
+                    }
+                    else
+                    {
+                        last_right_press_time_ = now;
+                    }
+                }
+            }
 
             // Handle mouse click events for vehicle/object picking
             if (!wantCaptureMouse && ea.getEventType() == osgGA::GUIEventAdapter::PUSH)
