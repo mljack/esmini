@@ -1653,32 +1653,11 @@ bool StudioGui::HandleTrajectoryPointClick()
     // the same pattern).
     UpdateMousePositionFromWorld();
 
-    // If a point is already selected, clicking on/near its gizmo again is what starts the drag - a plain
-    // click never modifies the trajectory (Trajectory_Editing.md 7.4).
-    if (trajectory_point_selected_)
-    {
-        auto it = data_model_.entity_trajectories_.find(trajectory_selected_entity_name_);
-        if (it != data_model_.entity_trajectories_.end() && trajectory_selected_point_index_ >= 0 &&
-            static_cast<size_t>(trajectory_selected_point_index_) < it->second.path_.points_.size())
-        {
-            const EntityPose& p  = it->second.path_.points_[static_cast<size_t>(trajectory_selected_point_index_)];
-            double            dx = p.x - hud_mouse_world_x_;
-            double            dy = p.y - hud_mouse_world_y_;
-            if (dx * dx + dy * dy <= kHitRadius * kHitRadius)
-            {
-                trajectory_point_drag_active_  = true;
-                trajectory_drag_entity_name_   = trajectory_selected_entity_name_;
-                trajectory_drag_point_index_   = trajectory_selected_point_index_;
-                trajectory_drag_start_mouse_x_ = hud_mouse_world_x_;
-                trajectory_drag_start_mouse_y_ = hud_mouse_world_y_;
-                trajectory_drag_start_point_x_ = p.x;
-                trajectory_drag_start_point_y_ = p.y;
-                return true;
-            }
-        }
-    }
-
-    // Otherwise, (re)select the nearest point across all entities, without starting a drag.
+    // Find the nearest point across all trajectory entities, whether or not one was already selected: every
+    // press that lands on a point both (re)selects it and arms a potential drag in the same motion. This does
+    // not violate "a plain click never modifies the trajectory" (Trajectory_Editing.md 7.4): if the button is
+    // released without the mouse having moved, the drag delta computed in UpdateTrajectoryPointDrag() is
+    // (0, 0), so nothing actually changes - only an intentional drag moves the point.
     std::string best_entity;
     int         best_index    = -1;
     double      best_dist_sqr = kHitRadius * kHitRadius;
@@ -1703,14 +1682,24 @@ bool StudioGui::HandleTrajectoryPointClick()
 
     if (best_index >= 0)
     {
-        trajectory_point_selected_        = true;
-        trajectory_selected_entity_name_  = best_entity;
-        trajectory_selected_point_index_  = best_index;
-        return true;  // consume the click: it selected a point, but did not modify anything
+        const EntityPose& p = data_model_.entity_trajectories_[best_entity].path_.points_[static_cast<size_t>(best_index)];
+
+        trajectory_point_selected_       = true;
+        trajectory_selected_entity_name_ = best_entity;
+        trajectory_selected_point_index_ = best_index;
+
+        trajectory_point_drag_active_  = true;
+        trajectory_drag_entity_name_   = best_entity;
+        trajectory_drag_point_index_   = best_index;
+        trajectory_drag_start_mouse_x_ = hud_mouse_world_x_;
+        trajectory_drag_start_mouse_y_ = hud_mouse_world_y_;
+        trajectory_drag_start_point_x_ = p.x;
+        trajectory_drag_start_point_y_ = p.y;
+        return true;  // consume the click: it selected a point (and armed a possible drag)
     }
 
     // Clicked empty space: clear the selection and let the click fall through to the existing logic below.
-    trajectory_point_selected_ = false;
+    trajectory_point_selected_       = false;
     trajectory_selected_point_index_ = -1;
     trajectory_selected_entity_name_.clear();
     return false;
@@ -1806,8 +1795,9 @@ void StudioGui::RenderTrajectoriesTab()
             const double kSpeedAxisMax = 25.0;
             double       s_axis_max    = std::max(1.0, length);
 
-            ImGui::TextDisabled("Drag a point up/down to change its speed (s cannot be dragged). Double-click to insert a point.");
-            ImGui::TextDisabled("The first point's s is fixed at 0 and the last point's s always tracks the path length.");
+            ImGui::TextDisabled("Click a point to select it (turns red; its row below highlights too).");
+            ImGui::TextDisabled("Drag the selected point to change its speed; hold Ctrl to also change s.");
+            ImGui::TextDisabled("Double-click anywhere to insert a point. Double-right-click a point to delete it.");
             if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
@@ -1823,7 +1813,8 @@ void StudioGui::RenderTrajectoriesTab()
                     ys.push_back(sp.speed);
                 }
 
-                bool profile_changed = false;
+                bool profile_changed          = false;
+                bool this_is_drag_target      = speed_point_drag_active_ && speed_drag_entity_name_ == name;
 
                 if (!xs.empty())
                 {
@@ -1831,37 +1822,149 @@ void StudioGui::RenderTrajectoriesTab()
 
                     for (size_t i = 0; i < xs.size(); i++)
                     {
-                        // x is intentionally passed in fresh (== the stored, fixed s) every frame and any
-                        // change DragPoint makes to it is discarded below: this locks dragging to the speed
-                        // (vertical) axis only, points can never be moved left/right this way.
-                        double x = xs[i];
-                        double y = ys[i];
-                        if (ImPlot::DragPoint(static_cast<int>(i), &x, &y, ImVec4(1.0f, 0.55f, 0.0f, 1.0f), 6.0f))
+                        bool is_selected = speed_point_selected_ && speed_selected_entity_name_ == name &&
+                                           speed_selected_point_index_ == static_cast<int>(i);
+                        ImVec4 col = is_selected ? ImVec4(1.0f, 0.15f, 0.15f, 1.0f) : ImVec4(1.0f, 0.55f, 0.0f, 1.0f);
+                        double px  = xs[i];
+                        double py  = ys[i];
+                        // NoInputs: rendering only. Selection/dragging is handled manually below so the
+                        // "select before drag", delta-based movement, and Ctrl-for-s rules can be enforced
+                        // (Trajectory_Editing.md 8.2), which ImPlot::DragPoint's built-in snap-to-cursor drag
+                        // cannot express on its own.
+                        ImPlot::DragPoint(static_cast<int>(i), &px, &py, col, 6.0f, ImPlotDragToolFlags_NoInputs);
+                    }
+                }
+
+                // Continue an already-armed drag on this entity's point regardless of hover, so a fast mouse
+                // move doesn't drop it.
+                if (speed_point_drag_active_ && this_is_drag_target)
+                {
+                    if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                    {
+                        ImPlotPoint mp          = ImPlot::GetPlotMousePos();
+                        double      delta_s     = mp.x - speed_drag_start_mouse_s_;
+                        double      delta_speed = mp.y - speed_drag_start_mouse_speed_;
+
+                        size_t idx       = static_cast<size_t>(speed_drag_point_index_);
+                        bool   is_anchor = (idx == 0) || (idx == traj.speed_profile_.points_.size() - 1);
+
+                        traj.speed_profile_.points_[idx].speed =
+                            std::min(kSpeedAxisMax, std::max(0.0, speed_drag_start_point_speed_ + delta_speed));
+                        if (ctrl_pressed_ && !is_anchor)
                         {
-                            traj.speed_profile_.points_[i].speed = std::min(kSpeedAxisMax, std::max(0.0, y));
-                            profile_changed                      = true;
+                            traj.speed_profile_.points_[idx].s =
+                                std::min(s_axis_max, std::max(0.0, speed_drag_start_point_s_ + delta_s));
+                        }
+                        profile_changed = true;
+                    }
+                    else
+                    {
+                        speed_point_drag_active_ = false;
+                    }
+                }
+
+                // Manual pixel-space hit-testing for select/insert/delete: more robust than
+                // ImPlot::IsPlotHovered(), which can report false while a DragPoint tool has hover captured.
+                ImVec2 plot_min      = ImPlot::GetPlotPos();
+                ImVec2 plot_max      = ImVec2(plot_min.x + ImPlot::GetPlotSize().x, plot_min.y + ImPlot::GetPlotSize().y);
+                ImVec2 mouse_pos     = ImGui::GetMousePos();
+                bool   mouse_in_plot = mouse_pos.x >= plot_min.x && mouse_pos.x <= plot_max.x &&
+                                     mouse_pos.y >= plot_min.y && mouse_pos.y <= plot_max.y;
+
+                auto find_nearest_pixel = [&](double pixel_radius) -> int
+                {
+                    int    best    = -1;
+                    double best_d2 = pixel_radius * pixel_radius;
+                    for (size_t i = 0; i < xs.size(); i++)
+                    {
+                        ImVec2 p  = ImPlot::PlotToPixels(ImPlotPoint(xs[i], ys[i]));
+                        double dx = p.x - mouse_pos.x;
+                        double dy = p.y - mouse_pos.y;
+                        double d2 = dx * dx + dy * dy;
+                        if (d2 < best_d2)
+                        {
+                            best_d2 = d2;
+                            best    = static_cast<int>(i);
+                        }
+                    }
+                    return best;
+                };
+
+                if (mouse_in_plot && !(speed_point_drag_active_ && this_is_drag_target))
+                {
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+                    {
+                        // No proximity requirement: double-clicking anywhere in the plot inserts a point there.
+                        ImPlotPoint mouse = ImPlot::GetPlotMousePos();
+                        traj.speed_profile_.InsertPoint(std::min(s_axis_max, std::max(0.0, mouse.x)),
+                                                        std::min(kSpeedAxisMax, std::max(0.0, mouse.y)));
+                        profile_changed = true;
+                        if (speed_selected_entity_name_ == name)
+                        {
+                            speed_point_selected_       = false;
+                            speed_selected_point_index_ = -1;
+                        }
+                    }
+                    else if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Right))
+                    {
+                        int idx = find_nearest_pixel(10.0);
+                        if (idx > 0 && idx < static_cast<int>(xs.size()) - 1)  // never the start/end anchors
+                        {
+                            traj.speed_profile_.RemovePoint(idx);
+                            profile_changed = true;
+                            if (speed_selected_entity_name_ == name)
+                            {
+                                speed_point_selected_       = false;
+                                speed_selected_point_index_ = -1;
+                            }
+                        }
+                    }
+                    else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    {
+                        int idx = find_nearest_pixel(10.0);
+                        if (idx >= 0)
+                        {
+                            // Select and simultaneously arm a potential drag: if the press ends without
+                            // moving, the delta computed above next frame is (0, 0) so nothing changes; a
+                            // plain click never modifies the profile (Trajectory_Editing.md 7.4/8.2).
+                            speed_point_selected_       = true;
+                            speed_selected_entity_name_ = name;
+                            speed_selected_point_index_ = idx;
+
+                            speed_point_drag_active_ = true;
+                            speed_drag_entity_name_  = name;
+                            speed_drag_point_index_  = idx;
+                            ImPlotPoint mp                = ImPlot::GetPlotMousePos();
+                            speed_drag_start_mouse_s_     = mp.x;
+                            speed_drag_start_mouse_speed_ = mp.y;
+                            speed_drag_start_point_s_     = traj.speed_profile_.points_[static_cast<size_t>(idx)].s;
+                            speed_drag_start_point_speed_ = traj.speed_profile_.points_[static_cast<size_t>(idx)].speed;
+                        }
+                        else if (speed_selected_entity_name_ == name)
+                        {
+                            speed_point_selected_ = false;
+                            speed_selected_point_index_ = -1;
+                            speed_selected_entity_name_.clear();
                         }
                     }
                 }
 
-                if (ImPlot::IsPlotHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-                {
-                    ImPlotPoint mouse = ImPlot::GetPlotMousePos();
-                    traj.speed_profile_.InsertPoint(std::min(s_axis_max, std::max(0.0, mouse.x)),
-                                                    std::min(kSpeedAxisMax, std::max(0.0, mouse.y)));
-                    profile_changed = true;
-                }
-
                 ImPlot::EndPlot();
 
-                if (profile_changed)
+                // Skip re-sorting/anchor-sync while a Ctrl-drag is actively moving this point's s, so the
+                // point's index stays stable across frames for the drag above; it's finalized on release
+                // (the frame speed_point_drag_active_ turns false, which happens before this check runs).
+                if (profile_changed && !(speed_point_drag_active_ && this_is_drag_target))
                 {
-                    // A double-click insert could in principle add a point out of order; EvaluateSpeed()
-                    // assumes points_ is sorted ascending by s, so restore that invariant after any edit.
+                    // A double-click insert (or an out-of-order Ctrl-drag) could leave points_ unsorted;
+                    // EvaluateSpeed() assumes ascending s, so restore that invariant after any edit.
                     std::sort(traj.speed_profile_.points_.begin(),
                              traj.speed_profile_.points_.end(),
                              [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
                     traj.SyncSpeedProfileEndpoints();
+                }
+                if (profile_changed)
+                {
                     data_model_.trajectories_modified_ = true;
                     trajectory_renderer_.MarkDirty(name);
                 }
@@ -1880,10 +1983,14 @@ void StudioGui::RenderTrajectoriesTab()
 
                 for (size_t i = 0; i < traj.speed_profile_.points_.size(); i++)
                 {
-                    bool is_anchor = (i == 0) || (i == traj.speed_profile_.points_.size() - 1);
+                    bool is_anchor  = (i == 0) || (i == traj.speed_profile_.points_.size() - 1);
+                    bool is_selected = speed_point_selected_ && speed_selected_entity_name_ == name &&
+                                       speed_selected_point_index_ == static_cast<int>(i);
 
                     ImGui::PushID(static_cast<int>(i));
                     ImGui::TableNextRow();
+                    if (is_selected)
+                        ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(120, 40, 40, 255));
 
                     ImGui::TableSetColumnIndex(0);
                     ImGui::SetNextItemWidth(-FLT_MIN);
@@ -1934,6 +2041,18 @@ void StudioGui::RenderTrajectoriesTab()
                 traj.SyncSpeedProfileEndpoints();
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(name);
+                if (speed_selected_entity_name_ == name)
+                {
+                    speed_point_selected_ = false;
+                    speed_selected_point_index_ = -1;
+                    speed_selected_entity_name_.clear();
+                }
+                if (speed_drag_entity_name_ == name)
+                {
+                    speed_point_drag_active_ = false;
+                    speed_drag_point_index_  = -1;
+                    speed_drag_entity_name_.clear();
+                }
             }
             else
             {
@@ -1960,6 +2079,12 @@ void StudioGui::RenderTrajectoriesTab()
                 traj.SyncSpeedProfileEndpoints();
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(name);
+                if (speed_selected_entity_name_ == name)
+                {
+                    speed_point_selected_ = false;
+                    speed_selected_point_index_ = -1;
+                    speed_selected_entity_name_.clear();
+                }
             }
         }
         ImGui::PopID();
@@ -1976,6 +2101,24 @@ void StudioGui::RenderTrajectoriesTab()
             trajectory_point_selected_ = false;
             trajectory_selected_point_index_ = -1;
             trajectory_selected_entity_name_.clear();
+        }
+        if (trajectory_point_drag_active_ && trajectory_drag_entity_name_ == entity_to_delete)
+        {
+            trajectory_point_drag_active_ = false;
+            trajectory_drag_point_index_  = -1;
+            trajectory_drag_entity_name_.clear();
+        }
+        if (speed_point_selected_ && speed_selected_entity_name_ == entity_to_delete)
+        {
+            speed_point_selected_ = false;
+            speed_selected_point_index_ = -1;
+            speed_selected_entity_name_.clear();
+        }
+        if (speed_point_drag_active_ && speed_drag_entity_name_ == entity_to_delete)
+        {
+            speed_point_drag_active_ = false;
+            speed_drag_point_index_  = -1;
+            speed_drag_entity_name_.clear();
         }
     }
 }

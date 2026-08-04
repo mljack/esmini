@@ -212,6 +212,25 @@ private:
     double      trajectory_drag_start_point_x_ = 0.0;
     double      trajectory_drag_start_point_y_ = 0.0;
 
+    // Speed profile chart selection/drag state (section 8.2): a click selects a point (highlighted red in the
+    // chart and its row in the table below); only the selected point can be dragged, and only in the same
+    // press that selected it or a later one that lands on it again. Dragging is delta-based like the 3D path
+    // point drag above: drag_start_mouse_* + drag_start_point_* record the state at the moment the press
+    // landed on the point, and every subsequent frame computes new_value = start_point + (mouse_now -
+    // mouse_start). By default only speed (the y axis) changes; holding Ctrl also allows s (x axis) to change,
+    // except on the first/last (anchor) points whose s always stays fixed regardless of Ctrl.
+    bool        speed_point_selected_       = false;
+    std::string speed_selected_entity_name_;
+    int         speed_selected_point_index_ = -1;
+
+    bool        speed_point_drag_active_       = false;
+    std::string speed_drag_entity_name_;
+    int         speed_drag_point_index_        = -1;
+    double      speed_drag_start_mouse_s_      = 0.0;
+    double      speed_drag_start_mouse_speed_  = 0.0;
+    double      speed_drag_start_point_s_      = 0.0;
+    double      speed_drag_start_point_speed_  = 0.0;
+
     // Right panel ("XML Tree"/"Trajectories" tabs) defaults to the Trajectories tab once, on the first frame,
     // without forcing it to stay selected afterwards.
     bool right_panel_default_tab_applied_ = false;
