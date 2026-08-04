@@ -306,6 +306,14 @@ StudioGui::StudioGui(viewer::StudioViewer* viewer)
     io.IniFilename = NULL;
     io.LogFilename = NULL;
 
+    // ImGui's default double-click distance (6px) is too strict for the speed profile chart's double-click
+    // gestures (insert/delete a point): a real double-click's two presses easily land more than 6px apart,
+    // which silently fails IsMouseDoubleClicked() and is instead seen as two separate single clicks - each of
+    // which only visibly does something when it happens to land on an existing point, which felt like
+    // "double-click only registers when precisely on the line/point" even though there was no such proximity
+    // check in the insert/delete code itself.
+    io.MouseDoubleClickMaxDist = 20.0f;
+
     io.SetClipboardTextFn = SetClipboardText;
     io.GetClipboardTextFn = GetClipboardText;
     io.ClipboardUserData  = NULL;
@@ -1799,7 +1807,9 @@ void StudioGui::RenderTrajectoriesTab()
             ImGui::TextDisabled("Click a point to select it (turns red; its row below highlights too).");
             ImGui::TextDisabled("Drag the selected point to change its speed; hold Ctrl to also change s.");
             ImGui::TextDisabled("Double-click anywhere to insert a point. Double-right-click a point to delete it.");
-            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect))
+            // NoMenus: disable ImPlot's own right-click context menu, which otherwise intercepts right clicks
+            // (opening its axis/fit menu) instead of letting our right-double-click-to-delete gesture see them.
+            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
                 ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, s_axis_max, ImGuiCond_Always);
@@ -1891,7 +1901,7 @@ void StudioGui::RenderTrajectoriesTab()
                     return best;
                 };
 
-                if (mouse_in_plot && !(speed_point_drag_active_ && this_is_drag_target))
+                if (mouse_in_plot && !speed_point_drag_active_)
                 {
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
                     {
