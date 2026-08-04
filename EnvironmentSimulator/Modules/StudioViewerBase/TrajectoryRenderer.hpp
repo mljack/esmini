@@ -63,6 +63,12 @@ public:
     void SetGhostOverride(const std::string& entity_name, double s);
     void ClearGhostOverride();
 
+    // While a ghost keyframe drag is active, highlight the drag's reachable [s_lo, s_hi] arc length range
+    // with a green overlay on the path line (Trajectory_Editing_Enhancement.md 12.2: the same oracle that
+    // pre-clamps the drag). Pass an empty name to clear.
+    void SetReachableRange(const std::string& entity_name, double s_lo, double s_hi);
+    void ClearReachableRange();
+
 private:
     osg::ref_ptr<osg::Group> root_;
     osg::ref_ptr<osg::Group> picking_preview_group_;
@@ -83,6 +89,9 @@ private:
     std::map<std::string, GhostState> ghost_states_;
     std::string                       ghost_override_entity_;
     double                            ghost_override_s_ = 0.0;
+    std::string                       reachable_entity_;
+    double                            reachable_s_lo_ = 0.0;
+    double                            reachable_s_hi_ = 0.0;
 
     // Shared default vehicle model used for every ghost marker (Trajectory_Editing.md section 7.2): trajectory-
     // editor-only vehicles have no xosc CatalogReference, so a single fixed VehicleCatalog.xosc entry is used

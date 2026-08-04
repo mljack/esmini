@@ -519,7 +519,7 @@ void StudioGui::Render(osg::RenderInfo&)
             else
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Time equals the previous keyframe");
             if (ghost_drag_blocked_)
-                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Blocked at a neighbouring keyframe");
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Clamped to the reachable range (green)");
             else if (v_avg > 30.0 || v_avg < 0.0)
                 ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Exceeds limits - will be clamped on release");
             ImGui::EndTooltip();
@@ -1478,8 +1478,9 @@ void StudioGui::HandleViewportContextMenu()
                      it->second.keyframes_[static_cast<size_t>(trajectory_keyframe_context_index_)].t);
             if (ImGui::MenuItem(label))
             {
-                it->second.keyframes_.erase(it->second.keyframes_.begin() + trajectory_keyframe_context_index_);
-                it->second.ResolveKeyframes();
+                // RemoveKeyframe also deletes the keyframe's pin node from the speed profile and re-solves
+                // the remaining chain (Trajectory_Editing_Enhancement.md 12.3).
+                it->second.RemoveKeyframe(trajectory_keyframe_context_index_);
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(trajectory_keyframe_context_entity_);
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
@@ -1964,6 +1965,10 @@ bool StudioGui::HandleGhostKeyframeClick()
     double s_min       = 0.0;
     double s_max       = traj.path_.GetTotalLength();
     double prev_t      = 0.0;
+    bool   has_prev    = false;
+    bool   has_next    = false;
+    double next_t      = 0.0;
+    double next_s      = 0.0;
     for (size_t i = 0; i < traj.keyframes_.size(); i++)
     {
         const TrajectoryKeyframe& kf = traj.keyframes_[i];
@@ -1973,12 +1978,19 @@ bool StudioGui::HandleGhostKeyframeClick()
         }
         else if (kf.t < drag_t)
         {
-            s_min  = std::max(s_min, kf.s);
-            prev_t = std::max(prev_t, kf.t);
+            s_min    = std::max(s_min, kf.s);
+            prev_t   = std::max(prev_t, kf.t);
+            has_prev = true;
         }
         else
         {
             s_max = std::min(s_max, kf.s);
+            if (!has_next || kf.t < next_t)
+            {
+                next_t = kf.t;
+                next_s = kf.s;
+            }
+            has_next = true;
         }
     }
 
@@ -1998,6 +2010,19 @@ bool StudioGui::HandleGhostKeyframeClick()
         return true;
     }
 
+    // Oracle pre-clamping (Trajectory_Editing_Enhancement.md 12.2): shrink the draggable range to what the
+    // solver could actually achieve, so releases never snap back. Forward: the farthest point reachable from
+    // the previous pin within the available time (first segment: v(0) is adjustable, so the ceiling speed is
+    // the honest optimum). Backward: dropping too close to the path end must leave the next keyframe's leg
+    // coverable at the ceiling speed.
+    TrajectorySolverLimits limits;
+    double                 v_entry = has_prev ? std::min(limits.v_max, std::max(0.0, traj.speed_profile_.EvaluateSpeed(s_min))) : limits.v_max;
+    s_max                          = std::min(s_max, s_min + MaxReachableDistance(v_entry, drag_t - prev_t, limits));
+    if (has_next)
+        s_min = std::max(s_min, next_s - limits.v_max * (next_t - drag_t));
+    if (s_min > s_max)
+        s_min = s_max;  // degenerate sandwich: the drag collapses to the single physically consistent point
+
     ghost_keyframe_drag_active_ = true;
     ghost_drag_entity_name_     = best_entity;
     ghost_drag_t_               = drag_t;
@@ -2008,8 +2033,10 @@ bool StudioGui::HandleGhostKeyframeClick()
     ghost_drag_s_min_           = s_min;
     ghost_drag_s_max_           = s_max;
 
-    // Show the 0.7-alpha "editing" ghost right away, before the first mouse move.
+    // Show the 0.7-alpha "editing" ghost right away, before the first mouse move, plus the green highlight
+    // of the reachable path range.
     trajectory_renderer_.SetGhostOverride(best_entity, best_s);
+    trajectory_renderer_.SetReachableRange(best_entity, s_min, s_max);
 
     return true;
 }
@@ -2048,6 +2075,7 @@ void StudioGui::EndGhostKeyframeDrag(bool commit)
 
     ghost_keyframe_drag_active_ = false;
     trajectory_renderer_.ClearGhostOverride();
+    trajectory_renderer_.ClearReachableRange();
 
     auto it = data_model_.entity_trajectories_.find(ghost_drag_entity_name_);
     if (!commit || it == data_model_.entity_trajectories_.end())
@@ -2687,8 +2715,8 @@ void StudioGui::RenderTrajectoriesTab()
 
                 if (kf_to_delete >= 0)
                 {
-                    traj.keyframes_.erase(traj.keyframes_.begin() + kf_to_delete);
-                    traj.ResolveKeyframes();
+                    // RemoveKeyframe also deletes the keyframe's pin node and re-solves the remaining chain.
+                    traj.RemoveKeyframe(kf_to_delete);
                     data_model_.trajectories_modified_ = true;
                     trajectory_renderer_.MarkDirty(name);
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
@@ -2739,6 +2767,7 @@ void StudioGui::RenderTrajectoriesTab()
         {
             ghost_keyframe_drag_active_ = false;
             trajectory_renderer_.ClearGhostOverride();
+            trajectory_renderer_.ClearReachableRange();
         }
 
         // Selection referencing the deleted entity has already been cleared above, so the captured snapshot
@@ -2916,6 +2945,7 @@ void StudioGui::RenderMenuBar()
                         speed_drag_entity_name_.clear();
                         ghost_keyframe_drag_active_       = false;
                         trajectory_renderer_.ClearGhostOverride();
+                        trajectory_renderer_.ClearReachableRange();
                         // Don't allow undoing back into whatever was loaded before this (section 11.5), and
                         // seed the new baseline so the first real edit after this load can still be undone.
                         data_model_.ClearTrajectoryUndoRedoStacks();

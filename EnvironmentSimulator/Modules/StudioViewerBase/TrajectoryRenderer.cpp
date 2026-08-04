@@ -34,6 +34,7 @@ const char* kDefaultVehicleEntry   = "car_white";
 
 const osg::Vec4 kPathLineColor      = osg::Vec4(1.0f, 0.55f, 0.0f, 1.0f);  // orange, distinct from the cyan XML-driven trajectory lines
 const osg::Vec4 kPreviewLineColor   = osg::Vec4(1.0f, 0.55f, 0.0f, 0.6f);  // same hue, only used for the not-yet-committed last segment
+const osg::Vec4 kReachableLineColor = osg::Vec4(0.2f, 1.0f, 0.2f, 0.9f);   // green overlay for the drag-reachable range
 const double    kLineZOffset        = 0.2;
 const double    kVertexMarkerRadius = 0.6;
 const double    kGizmoRadius        = 1.2;  // selected-point "gizmo" marker, deliberately larger/differently shaped than a plain vertex
@@ -217,6 +218,27 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         for (const auto& p : dense)
             line_points.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset));
         group->addChild(BuildLineStripNode(line_points, kPathLineColor, 3.0f));
+
+        // Reachable-range overlay while a ghost keyframe drag is active (Trajectory_Editing_Enhancement.md
+        // 12.2): a thicker green sub-polyline over [s_lo, s_hi]. Dense samples are 0.5 m apart, so the arc
+        // length maps directly onto sample indices.
+        if (entity_name == reachable_entity_ && reachable_s_hi_ > reachable_s_lo_)
+        {
+            int last_idx = static_cast<int>(dense.size()) - 1;
+            int idx_lo   = std::max(0, std::min(last_idx, static_cast<int>(std::floor(reachable_s_lo_ / 0.5))));
+            int idx_hi   = std::max(0, std::min(last_idx, static_cast<int>(std::ceil(reachable_s_hi_ / 0.5))));
+            if (idx_hi > idx_lo)
+            {
+                std::vector<osg::Vec3> range_points;
+                range_points.reserve(static_cast<size_t>(idx_hi - idx_lo) + 1);
+                for (int i = idx_lo; i <= idx_hi; i++)
+                {
+                    const EntityPose& p = dense[static_cast<size_t>(i)];
+                    range_points.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset + 0.05));
+                }
+                group->addChild(BuildLineStripNode(range_points, kReachableLineColor, 6.0f));
+            }
+        }
     }
 
     // Vertex markers for the sparse, user-editable control points. The selected point (if any, Trajectory_
@@ -345,6 +367,20 @@ void EntityTrajectoryRenderer::ClearGhostOverride()
 {
     ghost_override_entity_.clear();
     ghost_override_s_ = 0.0;
+}
+
+void EntityTrajectoryRenderer::SetReachableRange(const std::string& entity_name, double s_lo, double s_hi)
+{
+    reachable_entity_ = entity_name;
+    reachable_s_lo_   = s_lo;
+    reachable_s_hi_   = s_hi;
+}
+
+void EntityTrajectoryRenderer::ClearReachableRange()
+{
+    reachable_entity_.clear();
+    reachable_s_lo_ = 0.0;
+    reachable_s_hi_ = 0.0;
 }
 
 void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points, double mouse_x, double mouse_y, double mouse_z)
