@@ -2861,6 +2861,8 @@ void StudioGui::RenderMenuBar()
                         speed_point_drag_active_          = false;
                         speed_drag_point_index_           = -1;
                         speed_drag_entity_name_.clear();
+                        ghost_keyframe_drag_active_       = false;
+                        trajectory_renderer_.ClearGhostOverride();
                         // Don't allow undoing back into whatever was loaded before this (section 11.5), and
                         // seed the new baseline so the first real edit after this load can still be undone.
                         data_model_.ClearTrajectoryUndoRedoStacks();
@@ -3006,7 +3008,7 @@ void StudioGui::Undo()
         return;
     // Ignore Ctrl+Z while a trajectory gesture is in progress, rather than trying to reconcile an undo with a
     // not-yet-committed drag/picking session (Trajectory_Editing.md section 11.4).
-    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_)
+    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_ || ghost_keyframe_drag_active_)
         return;
 
     bool xml_is_newer = data_model_.CanUndo() &&
@@ -3030,7 +3032,7 @@ void StudioGui::Redo()
 {
     if (data_model_.mode_ != StudioMode::COMPOSER)
         return;
-    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_)
+    if (trajectory_picking_active_ || trajectory_point_drag_active_ || speed_point_drag_active_ || ghost_keyframe_drag_active_)
         return;
 
     bool xml_is_newer = data_model_.CanRedo() &&
