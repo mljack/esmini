@@ -109,3 +109,19 @@ unittest(
     ${OSI_LIBRARIES}
     ${SUMO_LIBRARIES}
     ${SOCK_LIB})
+
+# ############################### Creating executable (StudioTrajectorySolver_test) ##################################
+
+# The solver module is deliberately self-contained (no OSG/UI dependencies), so the test compiles it directly
+# instead of linking the full StudioViewerBase library.
+set(StudioTrajectorySolver_sources
+    StudioTrajectorySolver_test.cpp
+    "${STUDIO_VIEWER_BASE_PATH}/TrajectorySolver.cpp")
+
+unittest(
+    StudioTrajectorySolver_test
+    "${StudioTrajectorySolver_sources}")
+
+target_include_directories(
+    StudioTrajectorySolver_test
+    PRIVATE ${STUDIO_VIEWER_BASE_PATH})

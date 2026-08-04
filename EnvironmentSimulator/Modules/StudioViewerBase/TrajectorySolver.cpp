@@ -365,9 +365,19 @@ double SolveSegment(EntitySpeedProfile& profile, double s_a, double s_b, double 
 
     double v_entry = std::min(lim.v_max, std::max(0.0, profile.EvaluateSpeed(s_a)));
 
-    // --- Q0: physical reachability window (free interior shape + free terminal speed).
+    // --- Q0: physical reachability window (free interior shape + free terminal speed). For the first
+    // segment the entry speed v(0) is itself adjustable (finalized decision), so its window is set by the
+    // constant-speed extremes rather than by the current profile start speed.
     double t_min = 0.0, t_max = 0.0;
-    SegmentTimeWindow(v_entry, length, lim, &t_min, &t_max);
+    if (s_a <= kSEps)
+    {
+        t_min = length / lim.v_max;
+        t_max = length / lim.v_min;
+    }
+    else
+    {
+        SegmentTimeWindow(v_entry, length, lim, &t_min, &t_max);
+    }
     double solve_dt = std::min(t_max, std::max(t_min, target_dt));
     double r_phys   = std::fabs(target_dt - solve_dt);
     if (r_phys > lim.solve_tolerance)
@@ -518,8 +528,12 @@ double SolveSegment(EntitySpeedProfile& profile, double s_a, double s_b, double 
             if (t_left < lim.min_auto_point_spacing_time || t_right < lim.min_auto_point_spacing_time)
             {
                 std::vector<SpeedProfilePoint> with_ramp = profile.points_;
+                double                         r_before  = std::fabs(segment_time() - target_dt);
                 profile.RemovePoint(ramp_idx);
-                if (!SegmentAccelOk(profile.points_, s_a, s_b + kSEps, lim))
+                double r_after = std::fabs(segment_time() - target_dt);
+                // The spacing rule is soft, the constraint is not: revert the merge when it would break the
+                // acceleration limits or meaningfully regress the residual.
+                if (!SegmentAccelOk(profile.points_, s_a, s_b + kSEps, lim) || r_after > std::max(r_before, lim.solve_tolerance))
                     profile.points_ = with_ramp;
             }
         }
@@ -543,6 +557,13 @@ void SolveKeyframeChain(EntitySpeedProfile& profile, std::vector<TrajectoryKeyfr
 
     for (auto& kf : keyframes)
         kf.s = std::min(total_length, std::max(0.0, kf.s));
+
+    // Hygiene after path shrinking: nodes beyond the new total length are unreachable and would leave the
+    // profile unsorted (the caller keeps the end anchor at total_length via SyncSpeedProfileEndpoints()).
+    profile.points_.erase(std::remove_if(profile.points_.begin(),
+                                         profile.points_.end(),
+                                         [&](const SpeedProfilePoint& p) { return p.s > total_length + kSEps; }),
+                          profile.points_.end());
 
     std::sort(keyframes.begin(), keyframes.end(), [](const TrajectoryKeyframe& a, const TrajectoryKeyframe& b) { return a.t < b.t; });
 
