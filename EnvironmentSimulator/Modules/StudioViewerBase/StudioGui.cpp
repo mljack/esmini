@@ -490,6 +490,42 @@ void StudioGui::Render(osg::RenderInfo&)
         trajectory_renderer_.ClearPickingPreview();
     }
 
+    // Live feedback while a ghost keyframe is being dragged along its path (Trajectory_Editing_Enhancement.md
+    // 7.3): time, s from->to, the required average speed of the affected segment, and whether the drag is
+    // currently blocked at a neighbouring keyframe or would exceed the speed ceiling (=> will be clamped).
+    if (ghost_keyframe_drag_active_)
+    {
+        auto it = data_model_.entity_trajectories_.find(ghost_drag_entity_name_);
+        if (it != data_model_.entity_trajectories_.end())
+        {
+            // The affected segment runs from the latest keyframe before the drag time (or the path start).
+            double seg_t0 = 0.0, seg_s0 = 0.0;
+            for (const auto& kf : it->second.keyframes_)
+            {
+                if (kf.t < ghost_drag_t_ - 0.05 && kf.t > seg_t0)
+                {
+                    seg_t0 = kf.t;
+                    seg_s0 = kf.s;
+                }
+            }
+
+            double dt    = ghost_drag_t_ - seg_t0;
+            double v_avg = (dt > 1e-6) ? (ghost_drag_target_s_ - seg_s0) / dt : 0.0;
+
+            ImGui::BeginTooltip();
+            ImGui::Text("t=%.2f s   s: %.1f -> %.1f m", ghost_drag_t_, ghost_drag_start_s_, ghost_drag_target_s_);
+            if (dt > 1e-6)
+                ImGui::Text("Segment avg speed: %.1f m/s", v_avg);
+            else
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Time equals the previous keyframe");
+            if (ghost_drag_blocked_)
+                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Blocked at a neighbouring keyframe");
+            else if (v_avg > 30.0 || v_avg < 0.0)
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Exceeds limits - will be clamped on release");
+            ImGui::EndTooltip();
+        }
+    }
+
     if (pending_move_count_ > 0)
     {
         pending_move_count_--;
@@ -1377,6 +1413,7 @@ void StudioGui::HandleViewportContextMenu()
                     trajectory_selected_point_index_ = -1;
                     trajectory_selected_entity_name_.clear();
                 }
+                ResolveEntityKeyframes(trajectory_context_entity_name_);  // arc lengths changed
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
             if (!can_delete)
@@ -1415,8 +1452,42 @@ void StudioGui::HandleViewportContextMenu()
                 it->second.SyncSpeedProfileEndpoints();  // inserting a point changes the path's total length
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(trajectory_insert_context_entity_name_);
+                ResolveEntityKeyframes(trajectory_insert_context_entity_name_);  // arc lengths changed
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
+        }
+        ImGui::EndPopup();
+    }
+
+    // Right-click Delete Keyframe, for a click on a keyframe diamond marker (Trajectory_Editing_Enhancement.md 7.2).
+    if (trajectory_keyframe_context_menu_to_open_)
+    {
+        trajectory_keyframe_context_menu_to_open_ = false;
+        ImGui::OpenPopup("Trajectory Keyframe Context Menu");
+    }
+    if (ImGui::BeginPopup("Trajectory Keyframe Context Menu"))
+    {
+        auto it = data_model_.entity_trajectories_.find(trajectory_keyframe_context_entity_);
+        if (it != data_model_.entity_trajectories_.end() && trajectory_keyframe_context_index_ >= 0 &&
+            static_cast<size_t>(trajectory_keyframe_context_index_) < it->second.keyframes_.size())
+        {
+            char label[64];
+            snprintf(label,
+                     sizeof(label),
+                     "Delete Keyframe (t=%.2fs)",
+                     it->second.keyframes_[static_cast<size_t>(trajectory_keyframe_context_index_)].t);
+            if (ImGui::MenuItem(label))
+            {
+                it->second.keyframes_.erase(it->second.keyframes_.begin() + trajectory_keyframe_context_index_);
+                it->second.ResolveKeyframes();
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(trajectory_keyframe_context_entity_);
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+        }
+        else
+        {
+            ImGui::TextDisabled("Keyframe no longer exists");
         }
         ImGui::EndPopup();
     }
@@ -1818,10 +1889,156 @@ void StudioGui::EndTrajectoryPointDrag()
 {
     trajectory_point_drag_active_ = false;
     trajectory_drag_point_index_  = -1;
+    std::string dragged_entity    = trajectory_drag_entity_name_;
     trajectory_drag_entity_name_.clear();
+
+    // Dragging a path point changes arc lengths, so keyframe arrival times drift: auto re-solve (finalized
+    // decision, Trajectory_Editing_Enhancement.md section 6) before committing the undo step so the snapshot
+    // captures the fully consistent state.
+    ResolveEntityKeyframes(dragged_entity);
 
     // Commit one undo step for the whole drag gesture (Trajectory_Editing.md section 11.5); PushTrajectoryUndoState()
     // itself is a no-op if the point never actually moved (e.g. a click-and-release with zero movement).
+    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+}
+
+void StudioGui::ResolveEntityKeyframes(const std::string& entity_name)
+{
+    auto it = data_model_.entity_trajectories_.find(entity_name);
+    if (it == data_model_.entity_trajectories_.end() || it->second.keyframes_.empty())
+        return;
+    it->second.ResolveKeyframes();
+    data_model_.trajectories_modified_ = true;
+    trajectory_renderer_.MarkDirty(entity_name);
+}
+
+bool StudioGui::HandleGhostKeyframeClick()
+{
+    const double kGhostHitRadius = 2.5;  // meters; the ghost is a car-sized model, slightly larger than a point gizmo
+
+    if (data_model_.entity_trajectories_.empty())
+        return false;
+
+    UpdateMousePositionFromWorld();
+
+    std::string best_entity;
+    double      best_dist_sqr = kGhostHitRadius * kGhostHitRadius;
+    double      best_s        = 0.0;
+
+    for (const auto& entry : data_model_.entity_trajectories_)
+    {
+        if (entry.second.path_.points_.size() < 2)
+            continue;  // no meaningful path to slide along
+
+        double     ghost_s = 0.0;
+        EntityPose ghost_pose;
+        if (!trajectory_renderer_.GetGhostState(entry.first, &ghost_s, &ghost_pose))
+            continue;
+
+        double dx = ghost_pose.x - hud_mouse_world_x_;
+        double dy = ghost_pose.y - hud_mouse_world_y_;
+        double d2 = dx * dx + dy * dy;
+        if (d2 < best_dist_sqr)
+        {
+            best_dist_sqr = d2;
+            best_entity   = entry.first;
+            best_s        = ghost_s;
+        }
+    }
+
+    if (best_entity.empty())
+        return false;
+
+    EntityTrajectory& traj = data_model_.entity_trajectories_[best_entity];
+
+    ghost_keyframe_drag_active_ = true;
+    ghost_drag_entity_name_     = best_entity;
+    ghost_drag_t_               = static_cast<double>(data_model_.virtual_time_);
+    ghost_drag_start_s_         = best_s;
+    ghost_drag_target_s_        = best_s;
+    ghost_drag_blocked_         = false;
+
+    // Neighbour keyframe blocking bounds (finalized decision: a keyframe's s must never cross an adjacent
+    // keyframe's s, in either direction) plus "am I updating an existing keyframe at this time?".
+    const double kSameTimeEps = 0.05;  // seconds; scrubbing back to (almost) a keyframe's time edits that keyframe
+    ghost_drag_existing_kf_    = -1;
+    ghost_drag_s_min_          = 0.0;
+    ghost_drag_s_max_          = traj.path_.GetTotalLength();
+    for (size_t i = 0; i < traj.keyframes_.size(); i++)
+    {
+        const TrajectoryKeyframe& kf = traj.keyframes_[i];
+        if (std::fabs(kf.t - ghost_drag_t_) <= kSameTimeEps)
+            ghost_drag_existing_kf_ = static_cast<int>(i);
+        else if (kf.t < ghost_drag_t_)
+            ghost_drag_s_min_ = std::max(ghost_drag_s_min_, kf.s);
+        else
+            ghost_drag_s_max_ = std::min(ghost_drag_s_max_, kf.s);
+    }
+
+    return true;
+}
+
+void StudioGui::UpdateGhostKeyframeDrag()
+{
+    if (!ghost_keyframe_drag_active_)
+        return;
+
+    auto it = data_model_.entity_trajectories_.find(ghost_drag_entity_name_);
+    if (it == data_model_.entity_trajectories_.end())
+    {
+        EndGhostKeyframeDrag(false);
+        return;
+    }
+
+    UpdateMousePositionFromWorld();
+
+    // Slide along the path only: continuously project the mouse onto the path, discard the lateral component
+    // entirely (Trajectory_Editing_Enhancement.md section 2, finalized).
+    double s = 0.0, px = 0.0, py = 0.0, pz = 0.0, d2 = 0.0;
+    if (!it->second.path_.FindNearestPositionOnPath(hud_mouse_world_x_, hud_mouse_world_y_, &s, &px, &py, &pz, &d2))
+        return;
+
+    double clamped        = std::min(ghost_drag_s_max_, std::max(ghost_drag_s_min_, s));
+    ghost_drag_blocked_   = std::fabs(clamped - s) > 1e-6;
+    ghost_drag_target_s_  = clamped;
+
+    trajectory_renderer_.SetGhostOverride(ghost_drag_entity_name_, ghost_drag_target_s_);
+}
+
+void StudioGui::EndGhostKeyframeDrag(bool commit)
+{
+    if (!ghost_keyframe_drag_active_)
+        return;
+
+    ghost_keyframe_drag_active_ = false;
+    trajectory_renderer_.ClearGhostOverride();
+
+    auto it = data_model_.entity_trajectories_.find(ghost_drag_entity_name_);
+    if (!commit || it == data_model_.entity_trajectories_.end())
+        return;
+
+    EntityTrajectory& traj = it->second;
+
+    if (ghost_drag_existing_kf_ >= 0 && static_cast<size_t>(ghost_drag_existing_kf_) < traj.keyframes_.size())
+    {
+        traj.keyframes_[static_cast<size_t>(ghost_drag_existing_kf_)].s = ghost_drag_target_s_;
+    }
+    else
+    {
+        // Ignore a plain click that never actually moved the ghost - creating a keyframe that pins the
+        // current natural position would be a surprising side effect of an accidental click.
+        if (std::fabs(ghost_drag_target_s_ - ghost_drag_start_s_) < 0.05)
+            return;
+
+        TrajectoryKeyframe kf;
+        kf.t = ghost_drag_t_;
+        kf.s = ghost_drag_target_s_;
+        traj.keyframes_.push_back(kf);
+    }
+
+    traj.ResolveKeyframes();
+    data_model_.trajectories_modified_ = true;
+    trajectory_renderer_.MarkDirty(ghost_drag_entity_name_);
     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
@@ -1864,6 +2081,40 @@ bool StudioGui::HandleTrajectoryPointRightClick()
         trajectory_context_point_index_        = best_index;
         trajectory_point_context_menu_to_open_ = true;
         return true;
+    }
+
+    // Next priority: a keyframe diamond marker (Trajectory_Editing_Enhancement.md 7.2) - checked before the
+    // generic "near the path" test below, because keyframe markers always sit ON the path and would otherwise
+    // be unreachable behind the Insert Point menu.
+    {
+        std::string kf_entity;
+        int         kf_index    = -1;
+        double      kf_dist_sqr = kPointHitRadius * kPointHitRadius;
+
+        for (auto& entry : data_model_.entity_trajectories_)
+        {
+            for (size_t i = 0; i < entry.second.keyframes_.size(); i++)
+            {
+                EntityPose kf_pose = entry.second.path_.Evaluate(entry.second.keyframes_[i].s);
+                double     dx      = kf_pose.x - hud_mouse_world_x_;
+                double     dy      = kf_pose.y - hud_mouse_world_y_;
+                double     d2      = dx * dx + dy * dy;
+                if (d2 < kf_dist_sqr)
+                {
+                    kf_dist_sqr = d2;
+                    kf_entity   = entry.first;
+                    kf_index    = static_cast<int>(i);
+                }
+            }
+        }
+
+        if (kf_index >= 0)
+        {
+            trajectory_keyframe_context_entity_       = kf_entity;
+            trajectory_keyframe_context_index_        = kf_index;
+            trajectory_keyframe_context_menu_to_open_ = true;
+            return true;
+        }
     }
 
     // Otherwise: close enough to an existing path (its control-point polyline) to offer inserting a new point
@@ -1951,9 +2202,10 @@ void StudioGui::RenderTrajectoriesTab()
             // Speed Profile editing (Trajectory_Editing.md 8.2): a chart for quick/approximate graphical
             // editing (drag existing points, double-click to insert one), plus a precise numeric table below
             // it for exact values and for deleting points (the chart alone has no delete gesture). The s axis
-            // always auto-fits to the current path length and the speed axis is a fixed 0-25 m/s range, so
-            // box-select-to-zoom is disabled (it would fight the fixed/auto-fit ranges every frame anyway).
-            const double kSpeedAxisMax = 25.0;
+            // always auto-fits to the current path length and the speed axis is a fixed 0-30 m/s range (the
+            // keyframe solver's hard v_max, Trajectory_Editing_Enhancement.md section 11), so box-select-to-
+            // zoom is disabled (it would fight the fixed/auto-fit ranges every frame anyway).
+            const double kSpeedAxisMax = 30.0;
             double       s_axis_max    = std::max(1.0, length);
 
             ImGui::TextDisabled("Click a point to select it (turns red; its row below highlights too).");
@@ -1978,6 +2230,17 @@ void StudioGui::RenderTrajectoriesTab()
 
                 bool profile_changed          = false;
                 bool this_is_drag_target      = speed_point_drag_active_ && speed_drag_entity_name_ == name;
+
+                // Vertical reference lines at each keyframe's s (Trajectory_Editing_Enhancement.md 7.4), so
+                // it is obvious which part of the speed shape is pinned by which arrival-time constraint.
+                for (size_t k = 0; k < traj.keyframes_.size(); k++)
+                {
+                    const TrajectoryKeyframe& kf     = traj.keyframes_[k];
+                    double                    ref_x[2] = {kf.s, kf.s};
+                    double                    ref_y[2] = {0.0, kSpeedAxisMax};
+                    ImPlot::SetNextLineStyle(kf.feasible ? ImVec4(0.3f, 0.6f, 1.0f, 0.7f) : ImVec4(1.0f, 0.2f, 0.2f, 0.8f), 1.5f);
+                    ImPlot::PlotLine(("##kf" + std::to_string(k)).c_str(), ref_x, ref_y, 2);
+                }
 
                 if (!xs.empty())
                 {
@@ -2167,6 +2430,7 @@ void StudioGui::RenderTrajectoriesTab()
                              traj.speed_profile_.points_.end(),
                              [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
                     traj.SyncSpeedProfileEndpoints();
+                    ResolveEntityKeyframes(name);  // keyframes stay authoritative over manual speed edits
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
                 }
                 if (profile_changed)
@@ -2269,6 +2533,7 @@ void StudioGui::RenderTrajectoriesTab()
                     speed_drag_point_index_  = -1;
                     speed_drag_entity_name_.clear();
                 }
+                ResolveEntityKeyframes(name);
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
             else
@@ -2279,7 +2544,10 @@ void StudioGui::RenderTrajectoriesTab()
                          [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
                 traj.SyncSpeedProfileEndpoints();
                 if (commit_numeric_edit)
+                {
+                    ResolveEntityKeyframes(name);
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                }
             }
 
             if (ImGui::Button("Add Point"))
@@ -2304,7 +2572,81 @@ void StudioGui::RenderTrajectoriesTab()
                     speed_selected_point_index_ = -1;
                     speed_selected_entity_name_.clear();
                 }
+                ResolveEntityKeyframes(name);
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
+            // Keyframes (Trajectory_Editing_Enhancement.md 7.4): the arrival-time constraints recorded by
+            // dragging the ghost vehicle along its path in the map view. t is editable here (same re-solve
+            // path as dragging, finalized decision 9); s is edited by dragging the ghost only.
+            ImGui::SeparatorText("Keyframes");
+            if (traj.keyframes_.empty())
+            {
+                ImGui::TextDisabled("No keyframes. Scrub the timeline and drag the ghost vehicle along its path to add one.");
+            }
+            else
+            {
+                int  kf_to_delete   = -1;
+                bool kf_t_committed = false;
+
+                if (ImGui::BeginTable("##keyframes_table", 4, ImGuiTableFlags_SizingStretchProp))
+                {
+                    ImGui::TableSetupColumn("t (s)");
+                    ImGui::TableSetupColumn("s (m)");
+                    ImGui::TableSetupColumn("status");
+                    ImGui::TableSetupColumn("");
+                    ImGui::TableHeadersRow();
+
+                    for (size_t i = 0; i < traj.keyframes_.size(); i++)
+                    {
+                        TrajectoryKeyframe& kf = traj.keyframes_[i];
+                        ImGui::PushID(static_cast<int>(i) + 1000);
+                        ImGui::TableNextRow();
+
+                        ImGui::TableSetColumnIndex(0);
+                        ImGui::SetNextItemWidth(-FLT_MIN);
+                        float t_value = static_cast<float>(kf.t);
+                        if (ImGui::InputFloat("##kf_t", &t_value, 0.0f, 0.0f, "%.2f"))
+                            kf.t = std::max(0.0, static_cast<double>(t_value));
+                        if (ImGui::IsItemDeactivatedAfterEdit())
+                            kf_t_committed = true;
+
+                        ImGui::TableSetColumnIndex(1);
+                        ImGui::Text("%.2f", kf.s);
+
+                        ImGui::TableSetColumnIndex(2);
+                        if (kf.feasible)
+                            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK");
+                        else
+                            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "clamped, act. %.2fs", kf.achieved_t);
+
+                        ImGui::TableSetColumnIndex(3);
+                        if (ImGui::SmallButton("Go"))
+                            data_model_.virtual_time_ = static_cast<float>(kf.t);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Delete"))
+                            kf_to_delete = static_cast<int>(i);
+
+                        ImGui::PopID();
+                    }
+                    ImGui::EndTable();
+                }
+
+                if (kf_to_delete >= 0)
+                {
+                    traj.keyframes_.erase(traj.keyframes_.begin() + kf_to_delete);
+                    traj.ResolveKeyframes();
+                    data_model_.trajectories_modified_ = true;
+                    trajectory_renderer_.MarkDirty(name);
+                    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                }
+                else if (kf_t_committed)
+                {
+                    traj.ResolveKeyframes();  // same solve path as a ghost drag (finalized decision 9)
+                    data_model_.trajectories_modified_ = true;
+                    trajectory_renderer_.MarkDirty(name);
+                    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                }
             }
         }
         ImGui::PopID();
@@ -2339,6 +2681,11 @@ void StudioGui::RenderTrajectoriesTab()
             speed_point_drag_active_ = false;
             speed_drag_point_index_  = -1;
             speed_drag_entity_name_.clear();
+        }
+        if (ghost_keyframe_drag_active_ && ghost_drag_entity_name_ == entity_to_delete)
+        {
+            ghost_keyframe_drag_active_ = false;
+            trajectory_renderer_.ClearGhostOverride();
         }
 
         // Selection referencing the deleted entity has already been cleared above, so the captured snapshot
@@ -2829,8 +3176,19 @@ void StudioGui::RenderTimeline()
     ImGui::PushItemWidth(-1);
     data_model_.virtual_time_max_value_ = std::max(data_model_.virtual_time_, data_model_.virtual_time_max_value_);
 
+    // The slider is enabled in COMPOSER too (Trajectory_Editing_Enhancement.md 7.1): there it acts as the
+    // ghost preview scrubber (virtual_time_ only drives the trajectory ghost markers, no player is running),
+    // which is also where ghost keyframes are recorded from. Extend its range to cover the slowest ghost so
+    // every trajectory can be scrubbed end to end.
     if (data_model_.mode_ == StudioMode::COMPOSER)
-        ImGui::BeginDisabled(true);
+    {
+        for (const auto& entry : data_model_.entity_trajectories_)
+        {
+            double total_time = entry.second.speed_profile_.EvaluateTimeAtS(entry.second.path_.GetTotalLength());
+            data_model_.virtual_time_max_value_ = std::max(data_model_.virtual_time_max_value_, static_cast<float>(total_time));
+        }
+    }
+
     if (ImGui::SliderFloat("##virtual_time",
                            &data_model_.virtual_time_,
                            0.0f,
@@ -2841,8 +3199,6 @@ void StudioGui::RenderTimeline()
         data_model_.virtual_time_             = std::round(data_model_.virtual_time_ / 0.05) * 0.05;
         data_model_.virtual_time_manipulated_ = true;
     }
-    if (data_model_.mode_ == StudioMode::COMPOSER)
-        ImGui::EndDisabled();
     ImGui::End();
 }
 
@@ -3014,7 +3370,9 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             }
             else if (!isKeyDown && c == osgGA::GUIEventAdapter::KEY_Escape && !wantCaptureKeyboard)
             {
-                if (trajectory_picking_active_)
+                if (ghost_keyframe_drag_active_)
+                    EndGhostKeyframeDrag(false);  // cancel: ghost snaps back, nothing is committed
+                else if (trajectory_picking_active_)
                     CancelTrajectoryPickingPoint();
                 else if (heading_operation_active_)
                     CancelHeadingOperation();
@@ -3072,6 +3430,12 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                             // Trajectory point selection/drag consumed the click (Trajectory_Editing.md 7.4):
                             // either a point was just (re)selected, or the drag on an already-selected point's
                             // gizmo just started. Either way, do not fall through to xosc entity picking below.
+                        }
+                        else if (!heading_operation_active_ && !move_operation_active_ && HandleGhostKeyframeClick())
+                        {
+                            // Pressing on a ghost vehicle starts the slide-along-path keyframe drag
+                            // (Trajectory_Editing_Enhancement.md section 7.2). Path control points take
+                            // priority above since they are much smaller targets.
                         }
                         else if (heading_operation_active_)
                         {
@@ -3140,6 +3504,13 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             {
                 EndTrajectoryPointDrag();
             }
+
+            // Commit a ghost keyframe drag on left-button release (Trajectory_Editing_Enhancement.md 7.2)
+            if (ea.getEventType() == osgGA::GUIEventAdapter::RELEASE && ea.getButton() == osgGA::GUIEventAdapter::LEFT_MOUSE_BUTTON &&
+                ghost_keyframe_drag_active_)
+            {
+                EndGhostKeyframeDrag(true);
+            }
         }
         case osgGA::GUIEventAdapter::DRAG:
         case osgGA::GUIEventAdapter::MOVE:
@@ -3166,6 +3537,12 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
             if (trajectory_point_drag_active_)
             {
                 UpdateTrajectoryPointDrag();
+            }
+
+            // Update a ghost keyframe drag if active (Trajectory_Editing_Enhancement.md 7.2)
+            if (ghost_keyframe_drag_active_)
+            {
+                UpdateGhostKeyframeDrag();
             }
 
             // Track the mouse direction while modifying a heading

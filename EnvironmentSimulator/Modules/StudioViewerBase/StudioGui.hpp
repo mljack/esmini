@@ -145,6 +145,17 @@ private:
     // context menus. Actual popup rendering happens in HandleViewportContextMenu().
     bool HandleTrajectoryPointRightClick();
 
+    // Ghost keyframe editing (Trajectory_Editing_Enhancement.md section 7): pressing on a ghost vehicle in
+    // COMPOSER starts a drag that slides it along its own path (mouse continuously projected onto the path,
+    // never off it); releasing records/updates a (t, s) keyframe and runs the P0-P4 cascade re-solve.
+    bool HandleGhostKeyframeClick();
+    void UpdateGhostKeyframeDrag();
+    void EndGhostKeyframeDrag(bool commit);
+
+    // Re-run the keyframe cascade for one entity after any edit that invalidates arrival times (path geometry
+    // changes, manual speed profile edits). No-op when the entity has no keyframes.
+    void ResolveEntityKeyframes(const std::string& entity_name);
+
     // Unsaved-changes confirmation shown from the "Exit" menu item / window close (merged prompt covering
     // both modified_ and trajectories_modified_, see Trajectory_Editing.md section 5.4/13).
     void HandleExitConfirmDialog();
@@ -248,6 +259,25 @@ private:
     double      trajectory_insert_context_y_ = 0.0;
     double      trajectory_insert_context_z_ = 0.0;
     double      trajectory_insert_context_s_ = 0.0;
+
+    // Ghost keyframe drag state (Trajectory_Editing_Enhancement.md section 7): the ghost slides along its own
+    // path (mouse projected to arc length), hard-blocked at the neighbouring keyframes' s values in both
+    // directions. ghost_drag_existing_kf_ >= 0 means the drag updates that keyframe (same t) instead of
+    // creating a new one on release.
+    bool        ghost_keyframe_drag_active_ = false;
+    std::string ghost_drag_entity_name_;
+    double      ghost_drag_t_           = 0.0;
+    double      ghost_drag_start_s_     = 0.0;
+    double      ghost_drag_target_s_    = 0.0;
+    double      ghost_drag_s_min_       = 0.0;
+    double      ghost_drag_s_max_       = 0.0;
+    int         ghost_drag_existing_kf_ = -1;
+    bool        ghost_drag_blocked_     = false;
+
+    // Right-click context menu on a keyframe diamond marker (Delete Keyframe)
+    bool        trajectory_keyframe_context_menu_to_open_ = false;
+    std::string trajectory_keyframe_context_entity_;
+    int         trajectory_keyframe_context_index_ = -1;
 
     // Speed profile chart selection/drag state (section 8.2): a click selects a point (highlighted red in the
     // chart and its row in the table below); only the selected point can be dragged, and only in the same
