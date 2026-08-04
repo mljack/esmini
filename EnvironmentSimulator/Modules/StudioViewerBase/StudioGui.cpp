@@ -74,8 +74,9 @@ namespace
     std::vector<std::string>    attrs_to_delete;
     std::vector<SubelementInfo> elements_to_create;  // Now using SubelementInfo to store content model type
 
-    std::vector<std::string> scenario_filter = {"OpenSCENARIO Files", "*.xosc"};
-    std::vector<std::string> map_filter      = {"OpenDRIVE Files", "*.xodr"};
+    std::vector<std::string> scenario_filter  = {"OpenSCENARIO Files", "*.xosc"};
+    std::vector<std::string> map_filter       = {"OpenDRIVE Files", "*.xodr"};
+    std::vector<std::string> traj_json_filter = {"Trajectory Files", "*.traj.json"};
 
     // Check for attribute value dialog to open (in the main loop, not inside RenderNodeModifyMenu)
     bool        attr_value_dialog_to_open = false;
@@ -2262,6 +2263,36 @@ void StudioGui::RenderMenuBar()
                 to_save_file = true;
                 backup_path  = data_model_.xosc_path_;
                 data_model_.xosc_path_.clear();
+            }
+            if (ImGui::MenuItem("Load Trajectories ...", nullptr, false, in_composer_mode))
+            {
+                auto result = pfd::open_file("Choose a Trajectory File", "", traj_json_filter).result();
+                if (!result.empty())
+                {
+                    if (data_model_.LoadTrajJson(result[0]))
+                    {
+                        LOG("Successfully loaded the trajectory file: [%s].", result[0].c_str());
+                        // Loading replaces entity_trajectories_ wholesale (Trajectory_Editing.md 5.4); any
+                        // selection/drag/picking state referring to the previous set is now stale.
+                        trajectory_picking_active_       = false;
+                        trajectory_point_selected_        = false;
+                        trajectory_selected_point_index_  = -1;
+                        trajectory_selected_entity_name_.clear();
+                        trajectory_point_drag_active_    = false;
+                        trajectory_drag_point_index_     = -1;
+                        trajectory_drag_entity_name_.clear();
+                        speed_point_selected_             = false;
+                        speed_selected_point_index_       = -1;
+                        speed_selected_entity_name_.clear();
+                        speed_point_drag_active_          = false;
+                        speed_drag_point_index_           = -1;
+                        speed_drag_entity_name_.clear();
+                    }
+                    else
+                    {
+                        LOG("Failed to load trajectory file: %s", result[0].c_str());
+                    }
+                }
             }
             if (ImGui::MenuItem("Save Trajectories", nullptr, false, !data_model_.entity_trajectories_.empty() || data_model_.trajectories_modified_))
             {
