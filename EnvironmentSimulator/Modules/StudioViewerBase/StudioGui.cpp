@@ -1533,10 +1533,19 @@ void StudioGui::HandleAddTrajectoryDialog()
                 (add_trajectory_interp_mode_ == 0)   ? EntityPath::InterpMode::LINEAR
                 : (add_trajectory_interp_mode_ == 2) ? EntityPath::InterpMode::CLOTHOID
                                                       : EntityPath::InterpMode::CATMULL_ROM;
-            SpeedProfilePoint init_point;
-            init_point.s     = 0.0;
-            init_point.speed = static_cast<double>(add_trajectory_init_speed_);
-            traj.speed_profile_.points_.push_back(init_point);
+
+            // Start and end speed points are always created together: the start's s is fixed at 0, the end's
+            // s is kept in sync with the path's total length as points are picked/dragged (both are 0 for now
+            // since the path is still empty). Only the intermediate points a user adds later have a free s.
+            SpeedProfilePoint start_point;
+            start_point.s     = 0.0;
+            start_point.speed = static_cast<double>(add_trajectory_init_speed_);
+            traj.speed_profile_.points_.push_back(start_point);
+
+            SpeedProfilePoint end_point;
+            end_point.s     = 0.0;
+            end_point.speed = static_cast<double>(add_trajectory_init_speed_);
+            traj.speed_profile_.points_.push_back(end_point);
 
             StartTrajectoryPicking(entered_name);
 
@@ -1592,6 +1601,7 @@ void StudioGui::CommitTrajectoryPickingPoint()
     pose.SyncFromLane();  // snap x/y/z onto the matched lane so the point sits on the road surface
 
     it->second.path_.points_.push_back(pose);
+    it->second.SyncSpeedProfileEndpoints();  // the end speed point's s tracks the path's total length
     data_model_.trajectories_modified_ = true;
     trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
 }
@@ -1621,6 +1631,7 @@ void StudioGui::CancelTrajectoryPickingPoint()
     if (it != data_model_.entity_trajectories_.end() && !it->second.path_.points_.empty())
     {
         it->second.path_.points_.pop_back();
+        it->second.SyncSpeedProfileEndpoints();  // the end speed point's s tracks the path's total length
         trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
         return;
     }
@@ -1635,6 +1646,12 @@ void StudioGui::CancelTrajectoryPickingPoint()
 bool StudioGui::HandleTrajectoryPointClick()
 {
     const double kHitRadius = 2.0;  // meters, in the ground plane
+
+    // hud_mouse_world_x_/y_ are otherwise only refreshed once per Render() frame; since this is called from
+    // handle() at the moment of the mouse press, recompute them now so the hit-test uses the actual click
+    // position instead of a potentially stale value from the previous frame (see UpdateHeadingOperation() for
+    // the same pattern).
+    UpdateMousePositionFromWorld();
 
     // If a point is already selected, clicking on/near its gizmo again is what starts the drag - a plain
     // click never modifies the trajectory (Trajectory_Editing.md 7.4).
@@ -1726,6 +1743,7 @@ void StudioGui::UpdateTrajectoryPointDrag()
     pose.SyncFromLane();
 
     data_model_.trajectories_modified_ = true;
+    it->second.SyncSpeedProfileEndpoints();  // dragging a point changes the path's total length
     trajectory_renderer_.MarkDirty(trajectory_drag_entity_name_);
 }
 
@@ -1772,6 +1790,11 @@ void StudioGui::RenderTrajectoriesTab()
             double length = traj.path_.GetTotalLength();
             ImGui::Text("Path: %d points, %.1f m", static_cast<int>(traj.path_.points_.size()), length);
 
+            // Keep the speed profile's start (s=0) / end (s=path length) anchors correct even if something
+            // upstream forgot to call SyncSpeedProfileEndpoints() after changing the path (Trajectory_Editing.md
+            // 8.2): idempotent, so calling it again here every frame is harmless.
+            traj.SyncSpeedProfileEndpoints();
+
             if (ImGui::Button("Delete"))
                 entity_to_delete = name;
 
@@ -1783,7 +1806,8 @@ void StudioGui::RenderTrajectoriesTab()
             const double kSpeedAxisMax = 25.0;
             double       s_axis_max    = std::max(1.0, length);
 
-            ImGui::TextDisabled("Drag a point to move it, double-click the chart to insert one.");
+            ImGui::TextDisabled("Drag a point up/down to change its speed (s cannot be dragged). Double-click to insert a point.");
+            ImGui::TextDisabled("The first point's s is fixed at 0 and the last point's s always tracks the path length.");
             if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
@@ -1807,11 +1831,13 @@ void StudioGui::RenderTrajectoriesTab()
 
                     for (size_t i = 0; i < xs.size(); i++)
                     {
+                        // x is intentionally passed in fresh (== the stored, fixed s) every frame and any
+                        // change DragPoint makes to it is discarded below: this locks dragging to the speed
+                        // (vertical) axis only, points can never be moved left/right this way.
                         double x = xs[i];
                         double y = ys[i];
                         if (ImPlot::DragPoint(static_cast<int>(i), &x, &y, ImVec4(1.0f, 0.55f, 0.0f, 1.0f), 6.0f))
                         {
-                            traj.speed_profile_.points_[i].s     = std::min(s_axis_max, std::max(0.0, x));
                             traj.speed_profile_.points_[i].speed = std::min(kSpeedAxisMax, std::max(0.0, y));
                             profile_changed                      = true;
                         }
@@ -1830,17 +1856,20 @@ void StudioGui::RenderTrajectoriesTab()
 
                 if (profile_changed)
                 {
-                    // Points may have been dragged past a neighbor; EvaluateSpeed() assumes points_ is sorted
-                    // ascending by s, so restore that invariant after any edit.
+                    // A double-click insert could in principle add a point out of order; EvaluateSpeed()
+                    // assumes points_ is sorted ascending by s, so restore that invariant after any edit.
                     std::sort(traj.speed_profile_.points_.begin(),
                              traj.speed_profile_.points_.end(),
                              [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
+                    traj.SyncSpeedProfileEndpoints();
                     data_model_.trajectories_modified_ = true;
                     trajectory_renderer_.MarkDirty(name);
                 }
             }
 
-            // Precise numeric editing table, and the only way to delete a speed profile point.
+            // Precise numeric editing table, and the only way to delete a speed profile point. The first and
+            // last rows are the fixed start/end anchors: their s is read-only and they cannot be deleted, so
+            // there are always at least 2 points spanning [0, path length].
             int point_to_delete = -1;
             if (ImGui::BeginTable("##speed_profile_table", 3, ImGuiTableFlags_SizingStretchProp))
             {
@@ -1851,15 +1880,23 @@ void StudioGui::RenderTrajectoriesTab()
 
                 for (size_t i = 0; i < traj.speed_profile_.points_.size(); i++)
                 {
+                    bool is_anchor = (i == 0) || (i == traj.speed_profile_.points_.size() - 1);
+
                     ImGui::PushID(static_cast<int>(i));
                     ImGui::TableNextRow();
 
                     ImGui::TableSetColumnIndex(0);
                     ImGui::SetNextItemWidth(-FLT_MIN);
                     float s_value = static_cast<float>(traj.speed_profile_.points_[i].s);
-                    if (ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f"))
+                    if (is_anchor)
                     {
-                        traj.speed_profile_.points_[i].s   = std::max(0.0f, s_value);
+                        ImGui::BeginDisabled(true);
+                        ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f");
+                        ImGui::EndDisabled();
+                    }
+                    else if (ImGui::InputFloat("##s", &s_value, 0.0f, 0.0f, "%.2f"))
+                    {
+                        traj.speed_profile_.points_[i].s   = std::min(static_cast<float>(s_axis_max), std::max(0.0f, s_value));
                         data_model_.trajectories_modified_ = true;
                         trajectory_renderer_.MarkDirty(name);
                     }
@@ -1875,8 +1912,16 @@ void StudioGui::RenderTrajectoriesTab()
                     }
 
                     ImGui::TableSetColumnIndex(2);
-                    if (ImGui::SmallButton("Delete"))
+                    if (is_anchor)
+                    {
+                        ImGui::BeginDisabled(true);
+                        ImGui::SmallButton("Delete");
+                        ImGui::EndDisabled();
+                    }
+                    else if (ImGui::SmallButton("Delete"))
+                    {
                         point_to_delete = static_cast<int>(i);
+                    }
 
                     ImGui::PopID();
                 }
@@ -1886,6 +1931,7 @@ void StudioGui::RenderTrajectoriesTab()
             if (point_to_delete >= 0)
             {
                 traj.speed_profile_.RemovePoint(point_to_delete);
+                traj.SyncSpeedProfileEndpoints();
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(name);
             }
@@ -1895,13 +1941,23 @@ void StudioGui::RenderTrajectoriesTab()
                 std::sort(traj.speed_profile_.points_.begin(),
                          traj.speed_profile_.points_.end(),
                          [](const SpeedProfilePoint& a, const SpeedProfilePoint& b) { return a.s < b.s; });
+                traj.SyncSpeedProfileEndpoints();
             }
 
             if (ImGui::Button("Add Point"))
             {
-                double next_s     = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.back().s + 5.0;
-                double next_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.back().speed;
-                traj.speed_profile_.InsertPoint(next_s, next_speed);
+                // Insert at the midpoint between the last two points (rather than appending after the end
+                // anchor, which would leave it no longer the last / highest-s point).
+                size_t n = traj.speed_profile_.points_.size();
+                double new_s     = 0.0;
+                double new_speed = 0.0;
+                if (n >= 2)
+                {
+                    new_s     = 0.5 * (traj.speed_profile_.points_[n - 2].s + traj.speed_profile_.points_[n - 1].s);
+                    new_speed = 0.5 * (traj.speed_profile_.points_[n - 2].speed + traj.speed_profile_.points_[n - 1].speed);
+                }
+                traj.speed_profile_.InsertPoint(new_s, new_speed);
+                traj.SyncSpeedProfileEndpoints();
                 data_model_.trajectories_modified_ = true;
                 trajectory_renderer_.MarkDirty(name);
             }

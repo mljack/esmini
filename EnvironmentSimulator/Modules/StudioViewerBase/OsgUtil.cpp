@@ -281,7 +281,7 @@ osg::ref_ptr<osg::Node> CreateRedCylinderGeometry(double radius, double height, 
     std::vector<unsigned int> indicesVec;
 
     // Bottom cap
-    for (int i = 1; i < segments; i++)
+    for (int i = 1; i <= segments; i++)
     {
         indicesVec.push_back(0);  // center
         indicesVec.push_back(i);
@@ -290,7 +290,7 @@ osg::ref_ptr<osg::Node> CreateRedCylinderGeometry(double radius, double height, 
 
     // Top cap
     int topCenterIndex = segments + 2;
-    for (int i = 1; i < segments; i++)
+    for (int i = 1; i <= segments; i++)
     {
         indicesVec.push_back(topCenterIndex);
         indicesVec.push_back(topCenterIndex + i + 1);
@@ -408,7 +408,7 @@ osg::ref_ptr<osg::Node> CreateYellowConeGeometry(double radius, double height, i
     std::vector<unsigned int> indicesVec;
 
     // Bottom cap
-    for (int i = 1; i < segments; i++)
+    for (int i = 1; i <= segments; i++)
     {
         indicesVec.push_back(0);  // center
         indicesVec.push_back(i);

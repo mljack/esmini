@@ -181,6 +181,19 @@ public:
     {
         return !path_.points_.empty();
     }
+
+    // The first and last speed_profile_ points act as fixed "anchors" whose s is not user-editable: the first
+    // is always s=0, the last always tracks the path's current total length. Call after any edit that can
+    // change the path's length (new/moved point) to keep this invariant true; EvaluateSpeed()/EvaluateTimeAtS()
+    // assume the profile spans exactly [0, path_.GetTotalLength()].
+    void SyncSpeedProfileEndpoints()
+    {
+        if (speed_profile_.points_.empty())
+            return;
+        speed_profile_.points_.front().s = 0.0;
+        if (speed_profile_.points_.size() >= 2)
+            speed_profile_.points_.back().s = path_.GetTotalLength();
+    }
 };
 
 // Derive the ".traj.json" sidecar path from a ".xosc" path, e.g. "scenario.xosc" -> "scenario.traj.json".
