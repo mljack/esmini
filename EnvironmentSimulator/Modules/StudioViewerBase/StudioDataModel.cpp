@@ -2641,7 +2641,8 @@ double RoundToDecimals(double value, int decimals)
 EntityTrajectory& StudioDataModel::CreateEntityTrajectory(const std::string& entity_name)
 {
     EntityTrajectory traj;
-    traj.entity_name_ = entity_name;
+    traj.entity_name_       = entity_name;
+    traj.id_                = NextUniqueTrajectoryId();
     auto result             = entity_trajectories_.emplace(entity_name, std::move(traj));
     trajectories_modified_  = true;
     return result.first->second;
@@ -2651,6 +2652,14 @@ void StudioDataModel::RemoveEntityTrajectory(const std::string& entity_name)
 {
     if (entity_trajectories_.erase(entity_name) > 0)
         trajectories_modified_ = true;
+}
+
+int StudioDataModel::NextUniqueTrajectoryId() const
+{
+    int next_id = 1;
+    for (const auto& entry : entity_trajectories_)
+        next_id = std::max(next_id, entry.second.id_ + 1);
+    return next_id;
 }
 
 bool StudioDataModel::SaveTrajJson(const std::string& path)
@@ -2719,12 +2728,22 @@ std::string StudioDataModel::TrajectoriesToJsonString() const
         if (!traj.vehicle_catalog_entry_name_.empty())
             entity_json["vehicle_catalog_entry"] = traj.vehicle_catalog_entry_name_;
 
+        // Always written: unlike the other optional fields below, id_ has no "default" that would make it
+        // safe to omit (0 could clash with a legitimately-assigned id_ of 0).
+        entity_json["id"] = traj.id_;
+
         // Optional; both default to true when absent (backward-compatible with older files, and matching the
         // default for hand-authored trajectories). Only written out when false, to keep normal files unchanged.
         if (!traj.show_path_points_)
             entity_json["show_path_points"] = false;
         if (!traj.show_speed_points_)
             entity_json["show_speed_points"] = false;
+
+        // Optional; hidden defaults to false, alpha defaults to 1.0 (fully opaque) when absent.
+        if (traj.hidden_)
+            entity_json["hidden"] = true;
+        if (traj.alpha_ < 1.0)
+            entity_json["alpha"] = RoundToDecimals(traj.alpha_, 2);
 
         // Time keyframes (Trajectory_Editing_Enhancement.md, schema v2): only (t, s) is persisted; the world
         // position is derived from the path at render time and achieved_t/feasible are recomputed on load.
@@ -2775,6 +2794,11 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
             traj.vehicle_catalog_entry_name_ = entity_json.value("vehicle_catalog_entry", std::string());
             traj.show_path_points_           = entity_json.value("show_path_points", true);
             traj.show_speed_points_          = entity_json.value("show_speed_points", true);
+            traj.hidden_                     = entity_json.value("hidden", false);
+            traj.alpha_                      = entity_json.value("alpha", 1.0);
+            // -1 is a sentinel meaning "no explicit id in this file" (older files predating the id_ field);
+            // resolved to an actually-unique value in the post-processing pass below.
+            traj.id_ = entity_json.value("id", -1);
 
             if (entity_json.contains("path") && entity_json["path"].contains("points"))
             {
@@ -2825,6 +2849,15 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
             new_trajectories[traj.entity_name_] = std::move(traj);
         }
     }
+
+    // Assign unique ids to any entity whose file had no explicit "id" (older files predating the id_ field),
+    // starting after the highest explicitly-specified id so they don't clash with each other or those.
+    int next_auto_id = 1;
+    for (const auto& entry : new_trajectories)
+        next_auto_id = std::max(next_auto_id, entry.second.id_ + 1);
+    for (auto& entry : new_trajectories)
+        if (entry.second.id_ < 0)
+            entry.second.id_ = next_auto_id++;
 
     entity_trajectories_ = std::move(new_trajectories);
     return true;
@@ -2934,7 +2967,6 @@ bool StudioDataModel::ExportTrajectoriesCsv(const std::string& path) const
     file << std::setprecision(9);
 
     const double kSampleDt = 0.1;  // seconds; matches trajectories_test.csv's dominant sampling interval
-    int          next_id   = 1;
     int          exported  = 0;
 
     for (const auto& entry : entity_trajectories_)
@@ -2947,7 +2979,7 @@ bool StudioDataModel::ExportTrajectoriesCsv(const std::string& path) const
         double total_length = traj.path_.GetTotalLength();
         double total_time   = traj.speed_profile_.EvaluateTimeAtS(total_length);
         bool   is_ego       = (name == "ego" || name == "Ego" || name == "EGO");
-        int    id           = next_id++;
+        int    id           = traj.id_;  // the trajectory's own (user-editable, Trajectories tab) id
 
         CsvVehicleDimensions dims = LookupCsvVehicleDimensions(traj.vehicle_catalog_entry_name_);
 
@@ -3084,6 +3116,16 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
         // Trajectories tab's Show Path Point/Show Speed Point checkboxes).
         traj.show_path_points_  = false;
         traj.show_speed_points_ = false;
+        // Reuse the CSV's own ID when it parses as an integer, so a round-tripped export/import keeps the
+        // same id; fall back to an auto-assigned one if the CSV used a non-numeric identifier.
+        try
+        {
+            traj.id_ = std::stoi(id_entry.first);
+        }
+        catch (const std::exception&)
+        {
+            traj.id_ = NextUniqueTrajectoryId();
+        }
 
         double     cumulative_s = 0.0;
         bool       has_prev     = false;

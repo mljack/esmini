@@ -2406,6 +2406,12 @@ void StudioGui::RenderTrajectoriesTab()
     // entity's "Vehicle Type" combo below.
     std::vector<std::string> vehicle_type_options = GetVehicleCatalogEntryNames();
 
+    // Counts per id_, so each entity's ID field below can tell in O(1) whether its own id_ clashes with any
+    // other trajectory's (Trajectories tab ID field, highlighted red on a clash).
+    std::map<int, int> trajectory_id_counts;
+    for (const auto& entry : data_model_.entity_trajectories_)
+        trajectory_id_counts[entry.second.id_]++;
+
     for (auto& entry : data_model_.entity_trajectories_)
     {
         const std::string& name = entry.first;
@@ -2526,6 +2532,57 @@ void StudioGui::RenderTrajectoriesTab()
                 }
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
+
+            // Hide: master visibility switch, independent of Show Path Point/Show Speed Point (which only
+            // affect per-point editing) - while on, nothing is rendered for this trajectory at all.
+            ImGui::SameLine();
+            bool hidden = traj.hidden_;
+            if (ImGui::Checkbox("Hide", &hidden))
+            {
+                traj.hidden_                        = hidden;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
+            // Alpha: rendering opacity for the path line/ghost marker, quantized to 6 steps (0.0-1.0 in 0.2
+            // increments) via an int slider over sixths rather than a free float, per the requested "6 档".
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Alpha");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            int alpha_step = std::min(5, std::max(0, static_cast<int>(std::lround(traj.alpha_ * 5.0))));
+            char alpha_overlay[8];
+            snprintf(alpha_overlay, sizeof(alpha_overlay), "%.1f", alpha_step / 5.0);
+            if (ImGui::SliderInt("##alpha", &alpha_step, 0, 5, alpha_overlay))
+            {
+                traj.alpha_                        = alpha_step / 5.0;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+
+            // ID: user-editable unique identifier (also used as the CSV export's ID/raw_id columns);
+            // highlighted red when it clashes with another trajectory's id_. Uniqueness is only enforced
+            // visually - the user resolves a clash manually by editing one of the offending fields.
+            ImGui::SameLine();
+            ImGui::TextUnformatted("ID");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            bool duplicate_id = trajectory_id_counts[traj.id_] > 1;
+            if (duplicate_id)
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.6f, 0.0f, 0.0f, 0.8f));
+            int id_value = traj.id_;
+            if (ImGui::InputInt("##traj_id", &id_value, 0, 0))
+            {
+                traj.id_                           = id_value;
+                data_model_.trajectories_modified_ = true;
+            }
+            if (duplicate_id)
+                ImGui::PopStyleColor();
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 
             // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
             // editable only by dragging in the map view / the speed chart below, not via text input here.

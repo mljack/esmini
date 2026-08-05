@@ -168,6 +168,20 @@ public:
     bool show_path_points_  = true;
     bool show_speed_points_ = true;
 
+    // Unique per-trajectory identifier, editable in the Trajectories tab (also used as the CSV export's ID/
+    // raw_id columns). Uniqueness is only enforced visually (a red-highlighted input field) - the user has to
+    // resolve a clash manually, since two independently CSV-imported files could otherwise legitimately reuse
+    // the same ID.
+    int id_ = 0;
+
+    // Master visibility switch: while true, nothing is rendered for this trajectory (path line, points,
+    // keyframe markers, ghost) regardless of show_path_points_/show_speed_points_.
+    bool hidden_ = false;
+
+    // Rendering opacity in [0, 1] for the path line and ghost marker, set via a quantized (6-step) slider in
+    // the Trajectories tab.
+    double alpha_ = 1.0;
+
     bool HasPath() const
     {
         return !path_.points_.empty();
@@ -252,6 +266,10 @@ public:
     bool              SaveTrajJson(const std::string& path);
     EntityTrajectory& CreateEntityTrajectory(const std::string& entity_name);
     void              RemoveEntityTrajectory(const std::string& entity_name);
+
+    // One past the highest id_ currently in use across entity_trajectories_ (1 if empty), for assigning a
+    // fresh, presumably-unique id_ to a newly-created trajectory (Trajectories tab ID field).
+    int NextUniqueTrajectoryId() const;
 
     // CSV import/export (trajectories_test.csv-style per-timestep position log), independent of and in
     // addition to the ".traj.json" format above. Export samples every entity_trajectories_ path/speed profile

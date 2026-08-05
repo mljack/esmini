@@ -206,13 +206,21 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
     }
     group->removeChildren(0, group->getNumChildren());
 
+    // Master visibility switch (Trajectories tab "Hide" checkbox): leave the group mounted but empty.
+    if (traj.hidden_)
+        return;
+
     if (traj.path_.points_.empty())
         return;
 
-    // Path line (dense, curve-following samples rather than the raw sparse control points).
+    // Path line (dense, curve-following samples rather than the raw sparse control points), tinted by the
+    // Trajectories tab's Alpha slider.
     EntityPath path_copy = traj.path_;
     path_copy.RebuildDenseSamples(0.5);
     const std::vector<EntityPose>& dense = path_copy.DenseSamples();
+
+    osg::Vec4 path_line_color = kPathLineColor;
+    path_line_color.a()       = static_cast<float>(traj.alpha_);
 
     if (dense.size() >= 2)
     {
@@ -220,7 +228,7 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         line_points.reserve(dense.size());
         for (const auto& p : dense)
             line_points.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset));
-        group->addChild(BuildLineStripNode(line_points, kPathLineColor, 3.0f));
+        group->addChild(BuildLineStripNode(line_points, path_line_color, 3.0f));
 
         // Reachable-range overlay while a ghost keyframe drag is active (Trajectory_Editing_Enhancement.md
         // 12.2): a thicker green sub-polyline over [s_lo, s_hi]. Dense samples are 0.5 m apart, so the arc
@@ -304,13 +312,17 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
         ghost_tx->addChild(ghost_model.get());
 
         // While this vehicle is being Ctrl-dragged along its path (keyframe editing), render it semi-
-        // transparent (0.7 alpha) as the visual cue for the "ghost editing" state. Constant-alpha blending
-        // is applied on the per-entity transform so the shared model node itself is not modified (same
-        // technique as the entity models in StudioGui::GetOSGBModelForScenarioObject()).
+        // transparent (0.7 alpha) as the visual cue for the "ghost editing" state, additionally multiplied by
+        // the Trajectories tab's own Alpha slider. Constant-alpha blending is applied on the per-entity
+        // transform so the shared model node itself is not modified (same technique as the entity models in
+        // StudioGui::GetOSGBModelForScenarioObject()).
+        float ghost_alpha = static_cast<float>(traj.alpha_);
         if (entity_name == ghost_override_entity_)
+            ghost_alpha *= 0.7f;
+        if (ghost_alpha < 1.0f)
         {
             osg::ref_ptr<osg::StateSet>   state_set   = ghost_tx->getOrCreateStateSet();
-            osg::ref_ptr<osg::BlendColor> blend_color = new osg::BlendColor(osg::Vec4(1.0f, 1.0f, 1.0f, 0.7f));
+            osg::ref_ptr<osg::BlendColor> blend_color = new osg::BlendColor(osg::Vec4(1.0f, 1.0f, 1.0f, ghost_alpha));
             osg::ref_ptr<osg::BlendFunc>  blend_func  = new osg::BlendFunc(osg::BlendFunc::CONSTANT_ALPHA, osg::BlendFunc::ONE_MINUS_CONSTANT_ALPHA);
             state_set->setAttributeAndModes(blend_color.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
             state_set->setAttributeAndModes(blend_func.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
