@@ -1624,14 +1624,14 @@ void StudioGui::HandleAddVehicleDialog()
 
 void StudioGui::OpenAddTrajectoryDialog()
 {
-    // Suggest a unique name across BOTH namespaces (xosc ScenarioObjects and entity_trajectories_), so the map
-    // view never shows two differently-sourced objects sharing the same name (Trajectory_Editing.md 6.1/12).
+    // Suggest a name unique among entity_trajectories_ only - trajectory names don't need to avoid clashing
+    // with xosc ScenarioObject names (Trajectory_Editing.md 6.1/12: the two namespaces are independent).
     int         suffix = 1;
     std::string candidate;
     do
     {
         candidate = "traj_" + std::to_string(suffix++);
-    } while (data_model_.NameExists(candidate, pugi::xml_node()) || data_model_.entity_trajectories_.count(candidate) > 0);
+    } while (data_model_.entity_trajectories_.count(candidate) > 0);
 
     add_trajectory_name_        = candidate;
     add_trajectory_init_speed_  = 0.0f;
@@ -1711,16 +1711,16 @@ void StudioGui::HandleAddTrajectoryDialog()
         if (add_trajectory_start_time_ < 0.0f)
             add_trajectory_start_time_ = 0.0f;
 
-        // Validate the name across both the xosc and entity_trajectories_ namespaces (section 6.1/12)
-        bool name_empty = entered_name.empty();
-        bool is_duplicate =
-            !name_empty && (data_model_.NameExists(entered_name, pugi::xml_node()) || data_model_.entity_trajectories_.count(entered_name) > 0);
-        bool can_confirm = !name_empty && !is_duplicate;
+        // Validate uniqueness among entity_trajectories_ only - trajectory names are independent of xosc
+        // ScenarioObject names (section 6.1/12).
+        bool name_empty   = entered_name.empty();
+        bool is_duplicate = !name_empty && data_model_.entity_trajectories_.count(entered_name) > 0;
+        bool can_confirm  = !name_empty && !is_duplicate;
 
         if (name_empty)
             ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Name cannot be empty.");
         else if (is_duplicate)
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "An entity or trajectory named '%s' already exists.", entered_name.c_str());
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "A trajectory named '%s' already exists.", entered_name.c_str());
 
         if (!can_confirm)
             ImGui::BeginDisabled(true);

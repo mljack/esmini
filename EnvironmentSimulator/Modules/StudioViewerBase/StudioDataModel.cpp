@@ -3110,11 +3110,12 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
             continue;
         std::sort(samples.begin(), samples.end(), [](const CsvSample& a, const CsvSample& b) { return a.time < b.time; });
 
-        // Unique entity name across both the xosc and entity_trajectories_ namespaces (Trajectory_Editing.md 6.1/12).
+        // Unique entity name among entity_trajectories_ only - trajectory names are independent of xosc
+        // ScenarioObject names (Trajectory_Editing.md 6.1/12).
         std::string base_name   = "csv_" + id_entry.first;
         std::string entity_name = base_name;
         int         suffix      = 1;
-        while (NameExists(entity_name, pugi::xml_node()) || entity_trajectories_.count(entity_name) > 0)
+        while (entity_trajectories_.count(entity_name) > 0)
             entity_name = base_name + "_" + std::to_string(suffix++);
 
         EntityTrajectory traj;
