@@ -279,6 +279,7 @@ private:
     double      trajectory_insert_context_y_ = 0.0;
     double      trajectory_insert_context_z_ = 0.0;
     double      trajectory_insert_context_s_ = 0.0;
+    bool        trajectory_insert_context_allow_insert_ = true;  // false when show_path_points_ is off for the matched entity
 
     // Ghost keyframe drag state (Trajectory_Editing_Enhancement.md section 7): the ghost slides along its own
     // path (mouse projected to arc length), hard-blocked at the neighbouring keyframes' s values in both

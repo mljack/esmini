@@ -246,19 +246,24 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
     // Vertex markers for the sparse, user-editable control points. The selected point (if any, Trajectory_
     // Editing.md 7.4) is drawn as a bigger, differently-shaped "gizmo" so it is unambiguous which point a
-    // subsequent click-drag would move, versus a plain click that only (re)selects a point.
-    for (size_t i = 0; i < traj.path_.points_.size(); i++)
+    // subsequent click-drag would move, versus a plain click that only (re)selects a point. Skipped entirely
+    // when show_path_points_ is off (e.g. CSV-imported trajectories, which can have hundreds of raw points) -
+    // the path line above is still drawn, just without per-point clutter.
+    if (traj.show_path_points_)
     {
-        const EntityPose& p            = traj.path_.points_[i];
-        bool               is_selected = (entity_name == selected_entity_name_) && (static_cast<int>(i) == selected_point_index_);
+        for (size_t i = 0; i < traj.path_.points_.size(); i++)
+        {
+            const EntityPose& p            = traj.path_.points_[i];
+            bool               is_selected = (entity_name == selected_entity_name_) && (static_cast<int>(i) == selected_point_index_);
 
-        osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
-        tx->setPosition(osg::Vec3(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset)));
-        if (is_selected)
-            tx->addChild(CreateRedCylinderGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
-        else
-            tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
-        group->addChild(tx.get());
+            osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
+            tx->setPosition(osg::Vec3(static_cast<float>(p.x), static_cast<float>(p.y), static_cast<float>(p.z + kLineZOffset)));
+            if (is_selected)
+                tx->addChild(CreateRedCylinderGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
+            else
+                tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
+            group->addChild(tx.get());
+        }
     }
 
     // Keyframe markers (Trajectory_Editing_Enhancement.md 7.4): a 45-degree-yawed blue box ("diamond" from

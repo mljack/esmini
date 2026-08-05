@@ -77,6 +77,7 @@ namespace
     std::vector<std::string> scenario_filter  = {"OpenSCENARIO Files", "*.xosc"};
     std::vector<std::string> map_filter       = {"OpenDRIVE Files", "*.xodr"};
     std::vector<std::string> traj_json_filter = {"Trajectory Files", "*.traj.json"};
+    std::vector<std::string> traj_csv_filter  = {"CSV Files", "*.csv"};
 
     // Check for attribute value dialog to open (in the main loop, not inside RenderNodeModifyMenu)
     bool        attr_value_dialog_to_open = false;
@@ -1447,7 +1448,9 @@ void StudioGui::HandleViewportContextMenu()
     }
     if (ImGui::BeginPopup("Trajectory Insert Context Menu"))
     {
-        if (ImGui::MenuItem("Insert Point"))
+        if (!trajectory_insert_context_allow_insert_)
+            ImGui::BeginDisabled(true);
+        if (ImGui::MenuItem("Insert Point") && trajectory_insert_context_allow_insert_)
         {
             auto it = data_model_.entity_trajectories_.find(trajectory_insert_context_entity_name_);
             if (it != data_model_.entity_trajectories_.end())
@@ -1468,6 +1471,8 @@ void StudioGui::HandleViewportContextMenu()
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
         }
+        if (!trajectory_insert_context_allow_insert_)
+            ImGui::EndDisabled();
         ImGui::Separator();
         if (ImGui::MenuItem("Delete Trajectory"))
         {
@@ -1955,6 +1960,9 @@ bool StudioGui::HandleTrajectoryPointClick()
 
     for (auto& entry : data_model_.entity_trajectories_)
     {
+        if (!entry.second.show_path_points_)
+            continue;  // path point selection/drag is disabled for this entity (Trajectories tab checkbox)
+
         int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
         if (index < 0)
             continue;
@@ -2282,6 +2290,9 @@ bool StudioGui::HandleTrajectoryPointRightClick()
 
     for (auto& entry : data_model_.entity_trajectories_)
     {
+        if (!entry.second.show_path_points_)
+            continue;  // path point selection/context menu is disabled for this entity (Trajectories tab checkbox)
+
         int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
         if (index < 0)
             continue;
@@ -2371,6 +2382,9 @@ bool StudioGui::HandleTrajectoryPointRightClick()
         trajectory_insert_context_x_            = insert_x;
         trajectory_insert_context_y_            = insert_y;
         trajectory_insert_context_z_            = insert_z;
+        // Insert Point is a path point edit, so it stays disabled for entities with show_path_points_ off;
+        // Delete Trajectory (in the same popup) remains available regardless.
+        trajectory_insert_context_allow_insert_ = data_model_.entity_trajectories_.at(insert_entity).show_path_points_;
         trajectory_insert_context_menu_to_open_ = true;
         return true;
     }
@@ -2457,6 +2471,62 @@ void StudioGui::RenderTrajectoriesTab()
                 ImGui::EndCombo();
             }
 
+            // Show Path Point / Show Speed Point (Trajectory_Editing.md, extended): disable all path/speed
+            // point editing UI for this entity while off, while still rendering the path/speed curve itself.
+            // Off by default for CSV-imported trajectories, which can have hundreds of raw points where
+            // per-point editing/markers would be impractical (see StudioDataModel::ImportTrajectoriesCsv()).
+            ImGui::SameLine();
+            bool show_path_points = traj.show_path_points_;
+            if (ImGui::Checkbox("Show Path Point", &show_path_points))
+            {
+                traj.show_path_points_             = show_path_points;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+                if (!show_path_points)
+                {
+                    // Drop any selection/drag referencing this entity's path point - it's no longer
+                    // interactive, so leaving it "selected" would be misleading and could dangle.
+                    if (trajectory_point_selected_ && trajectory_selected_entity_name_ == name)
+                    {
+                        trajectory_point_selected_       = false;
+                        trajectory_selected_point_index_ = -1;
+                        trajectory_selected_entity_name_.clear();
+                    }
+                    if (trajectory_point_drag_active_ && trajectory_drag_entity_name_ == name)
+                    {
+                        trajectory_point_drag_active_ = false;
+                        trajectory_drag_point_index_  = -1;
+                        trajectory_drag_entity_name_.clear();
+                    }
+                }
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
+            ImGui::SameLine();
+            bool show_speed_points = traj.show_speed_points_;
+            if (ImGui::Checkbox("Show Speed Point", &show_speed_points))
+            {
+                traj.show_speed_points_            = show_speed_points;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+                if (!show_speed_points)
+                {
+                    if (speed_point_selected_ && speed_selected_entity_name_ == name)
+                    {
+                        speed_point_selected_       = false;
+                        speed_selected_point_index_ = -1;
+                        speed_selected_entity_name_.clear();
+                    }
+                    if (speed_point_drag_active_ && speed_drag_entity_name_ == name)
+                    {
+                        speed_point_drag_active_ = false;
+                        speed_drag_point_index_  = -1;
+                        speed_drag_entity_name_.clear();
+                    }
+                }
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
             // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
             // editable only by dragging in the map view / the speed chart below, not via text input here.
             if (!traj.path_.points_.empty())
@@ -2540,18 +2610,23 @@ void StudioGui::RenderTrajectoriesTab()
                 {
                     ImPlot::PlotLine("speed", xs.data(), ys.data(), static_cast<int>(xs.size()));
 
-                    for (size_t i = 0; i < xs.size(); i++)
+                    // Per-point markers/drag handles are skipped when show_speed_points_ is off (e.g.
+                    // CSV-imported profiles with hundreds of raw points) - the curve above is still drawn.
+                    if (traj.show_speed_points_)
                     {
-                        bool is_selected = speed_point_selected_ && speed_selected_entity_name_ == name &&
-                                           speed_selected_point_index_ == static_cast<int>(i);
-                        ImVec4 col = is_selected ? ImVec4(1.0f, 0.15f, 0.15f, 1.0f) : ImVec4(1.0f, 0.55f, 0.0f, 1.0f);
-                        double px  = xs[i];
-                        double py  = ys[i];
-                        // NoInputs: rendering only. Selection/dragging is handled manually below so the
-                        // "select before drag", delta-based movement, and Ctrl-for-s rules can be enforced
-                        // (Trajectory_Editing.md 8.2), which ImPlot::DragPoint's built-in snap-to-cursor drag
-                        // cannot express on its own.
-                        ImPlot::DragPoint(static_cast<int>(i), &px, &py, col, 6.0f, ImPlotDragToolFlags_NoInputs);
+                        for (size_t i = 0; i < xs.size(); i++)
+                        {
+                            bool is_selected = speed_point_selected_ && speed_selected_entity_name_ == name &&
+                                               speed_selected_point_index_ == static_cast<int>(i);
+                            ImVec4 col = is_selected ? ImVec4(1.0f, 0.15f, 0.15f, 1.0f) : ImVec4(1.0f, 0.55f, 0.0f, 1.0f);
+                            double px  = xs[i];
+                            double py  = ys[i];
+                            // NoInputs: rendering only. Selection/dragging is handled manually below so the
+                            // "select before drag", delta-based movement, and Ctrl-for-s rules can be enforced
+                            // (Trajectory_Editing.md 8.2), which ImPlot::DragPoint's built-in snap-to-cursor drag
+                            // cannot express on its own.
+                            ImPlot::DragPoint(static_cast<int>(i), &px, &py, col, 6.0f, ImPlotDragToolFlags_NoInputs);
+                        }
                     }
                 }
 
@@ -2593,6 +2668,10 @@ void StudioGui::RenderTrajectoriesTab()
 
                 // Manual pixel-space hit-testing for select/insert/delete: more robust than
                 // ImPlot::IsPlotHovered(), which can report false while a DragPoint tool has hover captured.
+                // The whole block is skipped when show_speed_points_ is off - no selection, drag, insert or
+                // delete of individual points, only the curve itself remains visible.
+                if (traj.show_speed_points_)
+                {
                 ImVec2 plot_min      = ImPlot::GetPlotPos();
                 ImVec2 plot_max      = ImVec2(plot_min.x + ImPlot::GetPlotSize().x, plot_min.y + ImPlot::GetPlotSize().y);
                 ImVec2 mouse_pos     = ImGui::GetMousePos();
@@ -2707,6 +2786,7 @@ void StudioGui::RenderTrajectoriesTab()
                     }
                     ImGui::EndPopup();
                 }
+                }  // traj.show_speed_points_
 
                 ImPlot::EndPlot();
 
@@ -2734,6 +2814,11 @@ void StudioGui::RenderTrajectoriesTab()
                 }
             }
 
+            // Precise numeric editing table, and the only way to delete a speed profile point. Skipped
+            // entirely (no header, no Add Point button, no table) when show_speed_points_ is off - the curve
+            // in the chart above is still drawn, just not individually editable.
+            if (traj.show_speed_points_)
+            {
             // Precise numeric editing table, and the only way to delete a speed profile point. The first and
             // last rows are the fixed start/end anchors: their s is read-only and they cannot be deleted, so
             // there are always at least 2 points spanning [0, path length]. Collapsed by default; "Add Point"
@@ -2871,6 +2956,11 @@ void StudioGui::RenderTrajectoriesTab()
                     ResolveEntityKeyframes(name);
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
                 }
+            }
+            }  // traj.show_speed_points_
+            else
+            {
+                ImGui::TextDisabled("Speed profile points hidden (enable \"Show Speed Point\" above to edit them).");
             }
 
             // Keyframes (Trajectory_Editing_Enhancement.md 7.4): the arrival-time constraints recorded by
@@ -3146,6 +3236,37 @@ void StudioGui::RenderMenuBar()
                     path = DeriveTrajJsonPath(data_model_.xosc_path_.empty() ? "scenario.xosc" : data_model_.xosc_path_);
                 data_model_.traj_json_path_ = path;
                 data_model_.SaveTrajJson(path);
+            }
+            if (ImGui::MenuItem("Export Trajectories as CSV ...", nullptr, false, !data_model_.entity_trajectories_.empty()))
+            {
+                auto file_path = pfd::save_file("Export Trajectories as CSV", "trajectories.csv", traj_csv_filter).result();
+                if (!file_path.empty())
+                {
+                    if (data_model_.ExportTrajectoriesCsv(file_path))
+                        LOG("Successfully exported trajectories to CSV: [%s]", file_path.c_str());
+                    else
+                        LOG("Failed to export trajectories to CSV: [%s]", file_path.c_str());
+                }
+            }
+            if (ImGui::MenuItem("Import CSV as Trajectories ...", nullptr, false, in_composer_mode))
+            {
+                auto result = pfd::open_file("Import CSV as Trajectories", "", traj_csv_filter).result();
+                if (!result.empty())
+                {
+                    if (data_model_.ImportTrajectoriesCsv(result[0]))
+                    {
+                        LOG("Successfully imported trajectories from CSV: [%s]", result[0].c_str());
+                        // Imported entities are new, but importing can add many at once; treat it like the
+                        // wholesale-replace load above for undo purposes (Trajectory_Editing.md section 11.5),
+                        // since it's not a single small discrete edit.
+                        data_model_.ClearTrajectoryUndoRedoStacks();
+                        data_model_.PushTrajectoryUndoState(TrajectorySelectionSnapshot());
+                    }
+                    else
+                    {
+                        LOG("Failed to import CSV as trajectories: %s", result[0].c_str());
+                    }
+                }
             }
             if (ImGui::MenuItem("Open an OpenDRIVE File ...", nullptr, false, in_composer_mode))
             {

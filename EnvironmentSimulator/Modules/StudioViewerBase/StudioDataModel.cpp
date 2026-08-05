@@ -23,6 +23,7 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
 
@@ -2718,6 +2719,13 @@ std::string StudioDataModel::TrajectoriesToJsonString() const
         if (!traj.vehicle_catalog_entry_name_.empty())
             entity_json["vehicle_catalog_entry"] = traj.vehicle_catalog_entry_name_;
 
+        // Optional; both default to true when absent (backward-compatible with older files, and matching the
+        // default for hand-authored trajectories). Only written out when false, to keep normal files unchanged.
+        if (!traj.show_path_points_)
+            entity_json["show_path_points"] = false;
+        if (!traj.show_speed_points_)
+            entity_json["show_speed_points"] = false;
+
         // Time keyframes (Trajectory_Editing_Enhancement.md, schema v2): only (t, s) is persisted; the world
         // position is derived from the path at render time and achieved_t/feasible are recomputed on load.
         if (!traj.keyframes_.empty())
@@ -2765,6 +2773,8 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
             const nlohmann::json& entity_json = it.value();
 
             traj.vehicle_catalog_entry_name_ = entity_json.value("vehicle_catalog_entry", std::string());
+            traj.show_path_points_           = entity_json.value("show_path_points", true);
+            traj.show_speed_points_          = entity_json.value("show_speed_points", true);
 
             if (entity_json.contains("path") && entity_json["path"].contains("points"))
             {
@@ -2837,5 +2847,280 @@ bool StudioDataModel::LoadTrajJson(const std::string& path)
     trajectories_modified_ = false;
     LOG("Trajectories loaded: [%s] (%d entities)", path.c_str(), static_cast<int>(entity_trajectories_.size()));
     return true;
+}
+
+namespace
+{
+// Length/Width/Height of an OSC vehicle catalog entry, used to populate the CSV's own Length/Width/Height
+// columns. Falls back to generic car dimensions if the catalog or the entry can't be found (e.g. no
+// vehicle_catalog_entry_name_ set, or the referenced catalog file has moved).
+struct CsvVehicleDimensions
+{
+    double length = 4.5;
+    double width  = 1.8;
+    double height = 1.5;
+};
+
+CsvVehicleDimensions LookupCsvVehicleDimensions(const std::string& entry_name)
+{
+    CsvVehicleDimensions dims;
+    if (entry_name.empty())
+        return dims;
+
+    // Mirrors the VehicleCatalog.xosc search-path logic used elsewhere for the same fixed catalog file
+    // (StudioGui::GetVehicleCatalogEntryNames(), EntityTrajectoryRenderer::LoadTrajectoryVehicleModel()).
+    std::vector<std::string> candidates = {"resources/xosc/Catalogs/Vehicles/VehicleCatalog.xosc",
+                                           "../resources/xosc/Catalogs/Vehicles/VehicleCatalog.xosc"};
+    for (const auto& search_path : SE_Env::Inst().GetPaths())
+    {
+        candidates.push_back(search_path + "/xosc/Catalogs/Vehicles/VehicleCatalog.xosc");
+        candidates.push_back(search_path + "/resources/xosc/Catalogs/Vehicles/VehicleCatalog.xosc");
+    }
+
+    pugi::xml_document doc;
+    bool                loaded = false;
+    for (const auto& candidate : candidates)
+    {
+        if (FileExists(candidate.c_str()) && doc.load_file(candidate.c_str()))
+        {
+            loaded = true;
+            break;
+        }
+    }
+    if (!loaded)
+        return dims;
+
+    for (pugi::xml_node vehicle : doc.child("OpenSCENARIO").child("Catalog").children("Vehicle"))
+    {
+        if (std::string(vehicle.attribute("name").as_string("")) != entry_name)
+            continue;
+        pugi::xml_node dims_node = vehicle.child("BoundingBox").child("Dimensions");
+        if (dims_node)
+        {
+            dims.length = dims_node.attribute("length").as_double(dims.length);
+            dims.width  = dims_node.attribute("width").as_double(dims.width);
+            dims.height = dims_node.attribute("height").as_double(dims.height);
+        }
+        break;
+    }
+    return dims;
+}
+
+// Minimal CSV line splitter: the trajectory CSV format has no quoted/escaped fields (every value is a plain
+// number or a short identifier), so a plain comma split is sufficient.
+std::vector<std::string> SplitCsvLine(const std::string& line)
+{
+    std::vector<std::string> fields;
+    std::string              field;
+    std::istringstream       stream(line);
+    while (std::getline(stream, field, ','))
+        fields.push_back(field);
+    if (!line.empty() && line.back() == ',')
+        fields.push_back("");  // a trailing empty field is otherwise dropped by the getline loop above
+    return fields;
+}
+}  // namespace
+
+bool StudioDataModel::ExportTrajectoriesCsv(const std::string& path) const
+{
+    std::ofstream file(path);
+    if (!file.is_open())
+    {
+        LOG("Failed to open [%s] for writing CSV trajectories", path.c_str());
+        return false;
+    }
+
+    file << "ID,Time,PositionX,PositionY,PositionZ,Length,Width,Height,Yaw,Pitch,Roll,VX,VY,VZ,AX,AY,AZ,Category,Style,Color,Ego,raw_id\n";
+    file << std::setprecision(9);
+
+    const double kSampleDt = 0.1;  // seconds; matches trajectories_test.csv's dominant sampling interval
+    int          next_id   = 1;
+    int          exported  = 0;
+
+    for (const auto& entry : entity_trajectories_)
+    {
+        const std::string&      name = entry.first;
+        const EntityTrajectory& traj = entry.second;
+        if (!traj.HasPath())
+            continue;
+
+        double total_length = traj.path_.GetTotalLength();
+        double total_time   = traj.speed_profile_.EvaluateTimeAtS(total_length);
+        bool   is_ego       = (name == "ego" || name == "Ego" || name == "EGO");
+        int    id           = next_id++;
+
+        CsvVehicleDimensions dims = LookupCsvVehicleDimensions(traj.vehicle_catalog_entry_name_);
+
+        for (double t = 0.0; t <= total_time + 1e-6; t += kSampleDt)
+        {
+            double     s     = traj.speed_profile_.EvaluateSAtTime(std::min(t, total_time));
+            EntityPose pose  = traj.path_.Evaluate(s);
+            double     speed = traj.speed_profile_.EvaluateSpeed(s);
+            double     vx    = speed * std::cos(pose.h);
+            double     vy    = speed * std::sin(pose.h);
+
+            file << id << ',' << t << ',' << pose.x << ',' << pose.y << ',' << pose.z << ',' << dims.length << ',' << dims.width << ','
+                << dims.height << ',' << pose.h << ",0,0," << vx << ',' << vy << ",0,0,0,0,vehicle,car,," << (is_ego ? "Y" : "N") << ',' << id
+                << "\n";
+        }
+        exported++;
+    }
+
+    file.close();
+    LOG("Trajectories exported to CSV: [%s] (%d entities)", path.c_str(), exported);
+    return true;
+}
+
+bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+    {
+        LOG("Failed to open [%s] for reading CSV trajectories", path.c_str());
+        return false;
+    }
+
+    std::string header_line;
+    if (!std::getline(file, header_line))
+    {
+        LOG("CSV file [%s] is empty", path.c_str());
+        return false;
+    }
+
+    std::vector<std::string>      header_fields = SplitCsvLine(header_line);
+    std::map<std::string, size_t> column_index;
+    for (size_t i = 0; i < header_fields.size(); i++)
+        column_index[header_fields[i]] = i;
+
+    auto find_column = [&](const std::string& column_name) -> int
+    {
+        auto found = column_index.find(column_name);
+        return found == column_index.end() ? -1 : static_cast<int>(found->second);
+    };
+
+    int id_col   = find_column("ID");
+    int time_col = find_column("Time");
+    int x_col    = find_column("PositionX");
+    int y_col    = find_column("PositionY");
+    int z_col    = find_column("PositionZ");
+    int yaw_col  = find_column("Yaw");
+    int vx_col   = find_column("VX");
+    int vy_col   = find_column("VY");
+    if (id_col < 0 || time_col < 0 || x_col < 0 || y_col < 0 || z_col < 0 || yaw_col < 0 || vx_col < 0 || vy_col < 0)
+    {
+        LOG("CSV file [%s] is missing one or more required columns "
+            "(ID, Time, PositionX, PositionY, PositionZ, Yaw, VX, VY)",
+            path.c_str());
+        return false;
+    }
+
+    struct CsvSample
+    {
+        double time = 0.0, x = 0.0, y = 0.0, z = 0.0, yaw = 0.0, vx = 0.0, vy = 0.0;
+    };
+
+    std::map<std::string, std::vector<CsvSample>> samples_by_id;
+    size_t max_needed_field_count =
+        static_cast<size_t>(std::max({id_col, time_col, x_col, y_col, z_col, yaw_col, vx_col, vy_col})) + 1;
+
+    std::string line;
+    int         line_number = 1;
+    while (std::getline(file, line))
+    {
+        line_number++;
+        if (line.empty())
+            continue;
+
+        std::vector<std::string> fields = SplitCsvLine(line);
+        if (fields.size() < max_needed_field_count)
+        {
+            LOG("CSV [%s] line %d: too few fields, skipping", path.c_str(), line_number);
+            continue;
+        }
+
+        try
+        {
+            CsvSample sample;
+            sample.time = std::stod(fields[static_cast<size_t>(time_col)]);
+            sample.x    = std::stod(fields[static_cast<size_t>(x_col)]);
+            sample.y    = std::stod(fields[static_cast<size_t>(y_col)]);
+            sample.z    = std::stod(fields[static_cast<size_t>(z_col)]);
+            sample.yaw  = std::stod(fields[static_cast<size_t>(yaw_col)]);
+            sample.vx   = std::stod(fields[static_cast<size_t>(vx_col)]);
+            sample.vy   = std::stod(fields[static_cast<size_t>(vy_col)]);
+            samples_by_id[fields[static_cast<size_t>(id_col)]].push_back(sample);
+        }
+        catch (const std::exception&)
+        {
+            LOG("CSV [%s] line %d: failed to parse numeric fields, skipping", path.c_str(), line_number);
+        }
+    }
+
+    if (samples_by_id.empty())
+    {
+        LOG("CSV file [%s] contained no usable trajectory rows", path.c_str());
+        return false;
+    }
+
+    int imported = 0;
+    for (auto& id_entry : samples_by_id)
+    {
+        std::vector<CsvSample>& samples = id_entry.second;
+        if (samples.empty())
+            continue;
+        std::sort(samples.begin(), samples.end(), [](const CsvSample& a, const CsvSample& b) { return a.time < b.time; });
+
+        // Unique entity name across both the xosc and entity_trajectories_ namespaces (Trajectory_Editing.md 6.1/12).
+        std::string base_name   = "csv_" + id_entry.first;
+        std::string entity_name = base_name;
+        int         suffix      = 1;
+        while (NameExists(entity_name, pugi::xml_node()) || entity_trajectories_.count(entity_name) > 0)
+            entity_name = base_name + "_" + std::to_string(suffix++);
+
+        EntityTrajectory traj;
+        traj.entity_name_       = entity_name;
+        traj.path_.interp_mode_ = EntityPath::InterpMode::LINEAR;  // preserve the raw recorded points as-is
+        // Too many raw points to sensibly show/edit individually (Trajectory_Editing.md, see also the
+        // Trajectories tab's Show Path Point/Show Speed Point checkboxes).
+        traj.show_path_points_  = false;
+        traj.show_speed_points_ = false;
+
+        double     cumulative_s = 0.0;
+        bool       has_prev     = false;
+        EntityPose prev_pose;
+        for (const CsvSample& sample : samples)
+        {
+            EntityPose pose;
+            pose.x      = sample.x;
+            pose.y      = sample.y;
+            pose.z      = sample.z;
+            pose.h      = sample.yaw;
+            pose.source = EntityPose::SourceRepr::WORLD;
+            // Deliberately not calling SyncFromWorld()/SyncFromLane(): these are exact recorded world
+            // positions and must not be snapped onto a lane centerline the way freshly-picked points are.
+
+            if (has_prev)
+                cumulative_s += Distance3D(prev_pose, pose);
+
+            traj.path_.points_.push_back(pose);
+
+            SpeedProfilePoint sp;
+            sp.s     = cumulative_s;
+            sp.speed = std::sqrt(sample.vx * sample.vx + sample.vy * sample.vy);
+            traj.speed_profile_.points_.push_back(sp);
+
+            prev_pose = pose;
+            has_prev  = true;
+        }
+        traj.SyncSpeedProfileEndpoints();
+
+        entity_trajectories_[entity_name] = std::move(traj);
+        imported++;
+    }
+
+    if (imported > 0)
+        trajectories_modified_ = true;
+    LOG("Trajectories imported from CSV: [%s] (%d entities)", path.c_str(), imported);
+    return imported > 0;
 }
 

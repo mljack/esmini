@@ -161,6 +161,13 @@ public:
     // that ResolveKeyframes() turns into speed profile modifications via the Q0-Q3 cascade.
     std::vector<TrajectoryKeyframe> keyframes_;
 
+    // Whether path/speed-profile points are shown (as vertex markers / table rows) and individually editable
+    // in the map view and the Trajectories tab. Off by default for CSV-imported trajectories, which can have
+    // many hundreds of raw points where per-point editing/markers would be impractical and would clutter the
+    // view; the path/speed curve itself is still rendered and the whole trajectory can still be deleted.
+    bool show_path_points_  = true;
+    bool show_speed_points_ = true;
+
     bool HasPath() const
     {
         return !path_.points_.empty();
@@ -245,6 +252,14 @@ public:
     bool              SaveTrajJson(const std::string& path);
     EntityTrajectory& CreateEntityTrajectory(const std::string& entity_name);
     void              RemoveEntityTrajectory(const std::string& entity_name);
+
+    // CSV import/export (trajectories_test.csv-style per-timestep position log), independent of and in
+    // addition to the ".traj.json" format above. Export samples every entity_trajectories_ path/speed profile
+    // at a fixed time step; import groups rows by ID into new entity_trajectories_ entries (one raw sample per
+    // path/speed profile point each, hence show_path_points_/show_speed_points_ default to false on import -
+    // there are usually far too many to sensibly edit one by one).
+    bool ExportTrajectoriesCsv(const std::string& path) const;
+    bool ImportTrajectoriesCsv(const std::string& path);
 
     void LoadConfig();
     void SaveConfig();
