@@ -2478,6 +2478,27 @@ void StudioGui::RenderTrajectoriesTab()
 
         if (header_open)
         {
+            // ID: user-editable unique identifier (also used as the CSV export's ID/raw_id columns);
+            // highlighted red when it clashes with another trajectory's id_. Uniqueness is only enforced
+            // visually - the user resolves a clash manually by editing one of the offending fields.
+            ImGui::TextUnformatted("ID");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            bool duplicate_id = trajectory_id_counts[traj.id_] > 1;
+            if (duplicate_id)
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.6f, 0.0f, 0.0f, 0.8f));
+            int id_value = traj.id_;
+            if (ImGui::InputInt("##traj_id", &id_value, 0, 0))
+            {
+                traj.id_                           = id_value;
+                data_model_.trajectories_modified_ = true;
+            }
+            if (duplicate_id)
+                ImGui::PopStyleColor();
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            ImGui::SameLine();
+
             // Vehicle Type (VehicleCatalog.xosc entryName) used for this trajectory's ghost marker model
             // (Trajectory_Editing.md 7.2, extended): changing it here re-loads the model on the next
             // MarkDirty()'d rebuild, same as picking a different one in the Add Trajectory dialog.
@@ -2571,45 +2592,6 @@ void StudioGui::RenderTrajectoriesTab()
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
 
-            // Alpha: rendering opacity for the path line/ghost marker, quantized to 6 steps (0.0-1.0 in 0.2
-            // increments) via an int slider over sixths rather than a free float, per the requested "6 档".
-            ImGui::SameLine();
-            ImGui::TextUnformatted("Alpha");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(120.0f);
-            int alpha_step = std::min(5, std::max(0, static_cast<int>(std::lround(traj.alpha_ * 5.0))));
-            char alpha_overlay[8];
-            snprintf(alpha_overlay, sizeof(alpha_overlay), "%.1f", alpha_step / 5.0);
-            if (ImGui::SliderInt("##alpha", &alpha_step, 0, 5, alpha_overlay))
-            {
-                traj.alpha_                        = alpha_step / 5.0;
-                data_model_.trajectories_modified_ = true;
-                trajectory_renderer_.MarkDirty(name);
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
-
-            // ID: user-editable unique identifier (also used as the CSV export's ID/raw_id columns);
-            // highlighted red when it clashes with another trajectory's id_. Uniqueness is only enforced
-            // visually - the user resolves a clash manually by editing one of the offending fields.
-            ImGui::SameLine();
-            ImGui::TextUnformatted("ID");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(80.0f);
-            bool duplicate_id = trajectory_id_counts[traj.id_] > 1;
-            if (duplicate_id)
-                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.6f, 0.0f, 0.0f, 0.8f));
-            int id_value = traj.id_;
-            if (ImGui::InputInt("##traj_id", &id_value, 0, 0))
-            {
-                traj.id_                           = id_value;
-                data_model_.trajectories_modified_ = true;
-            }
-            if (duplicate_id)
-                ImGui::PopStyleColor();
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
-
             // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
             // editable only by dragging in the map view / the speed chart below, not via text input here.
             if (!traj.path_.points_.empty())
@@ -2624,7 +2606,25 @@ void StudioGui::RenderTrajectoriesTab()
 
             double init_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.front().speed;
             ImGui::SameLine();
-            ImGui::Text("   Init speed: %.2f m/s", init_speed);
+            ImGui::Text("; Init speed: %.2f m/s", init_speed);
+
+            // Alpha: rendering opacity for the path line/ghost marker, quantized to 6 steps (0.0-1.0 in 0.2
+            // increments) via an int slider over sixths rather than a free float, per the requested "6 档".
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Alpha");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f);
+            int  alpha_step = std::min(5, std::max(0, static_cast<int>(std::lround(traj.alpha_ * 5.0))));
+            char alpha_overlay[8];
+            snprintf(alpha_overlay, sizeof(alpha_overlay), "%.1f", alpha_step / 5.0);
+            if (ImGui::SliderInt("##alpha", &alpha_step, 0, 5, alpha_overlay))
+            {
+                traj.alpha_                        = alpha_step / 5.0;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 
             double length = traj.path_.GetTotalLength();
 
@@ -2897,17 +2897,18 @@ void StudioGui::RenderTrajectoriesTab()
                 }
             }
 
-            // Precise numeric editing table, and the only way to delete a speed profile point. Skipped
-            // entirely (no header, no Add Point button, no table) when show_speed_points_ is off - the curve
-            // in the chart above is still drawn, just not individually editable.
-            if (traj.show_speed_points_)
-            {
             // Precise numeric editing table, and the only way to delete a speed profile point. The first and
             // last rows are the fixed start/end anchors: their s is read-only and they cannot be deleted, so
             // there are always at least 2 points spanning [0, path length]. Collapsed by default; "Add Point"
-            // sits on the header's own row so it stays reachable without expanding the table.
-            bool speed_table_open = ImGui::CollapsingHeader("Speed Profile Points");
+            // sits on the header's own row so it stays reachable without expanding the table. The header
+            // itself stays interactive even when show_speed_points_ is off, so the table can still be opened
+            // to *view* the values - only the actual editing widgets (Add Point, per-row inputs/Delete) are
+            // grayed out/disabled in that case, per the Trajectories tab's Show Speed Point checkbox.
+            bool speed_points_enabled = traj.show_speed_points_;
+            bool speed_table_open     = ImGui::CollapsingHeader("Speed Profile Points");
             ImGui::SameLine(ImGui::GetWindowWidth() - 90.0f);
+            if (!speed_points_enabled)
+                ImGui::BeginDisabled(true);
             if (ImGui::SmallButton("Add Point"))
             {
                 // Insert at the midpoint between the last two points (rather than appending after the end
@@ -2933,6 +2934,8 @@ void StudioGui::RenderTrajectoriesTab()
                 ResolveEntityKeyframes(name);
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
+            if (!speed_points_enabled)
+                ImGui::EndDisabled();
 
             int  point_to_delete     = -1;
             bool commit_numeric_edit = false;  // set when an InputFloat below finishes an edit (see IsItemDeactivatedAfterEdit)
@@ -2942,6 +2945,9 @@ void StudioGui::RenderTrajectoriesTab()
                 ImGui::TableSetupColumn("speed (m/s)");
                 ImGui::TableSetupColumn("");
                 ImGui::TableHeadersRow();
+
+                if (!speed_points_enabled)
+                    ImGui::BeginDisabled(true);
 
                 for (size_t i = 0; i < traj.speed_profile_.points_.size(); i++)
                 {
@@ -3003,6 +3009,8 @@ void StudioGui::RenderTrajectoriesTab()
 
                     ImGui::PopID();
                 }
+                if (!speed_points_enabled)
+                    ImGui::EndDisabled();
                 ImGui::EndTable();
             }
 
@@ -3039,11 +3047,6 @@ void StudioGui::RenderTrajectoriesTab()
                     ResolveEntityKeyframes(name);
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
                 }
-            }
-            }  // traj.show_speed_points_
-            else
-            {
-                ImGui::TextDisabled("Speed profile points hidden (enable \"Show Speed Point\" above to edit them).");
             }
 
             // Keyframes (Trajectory_Editing_Enhancement.md 7.4): the arrival-time constraints recorded by

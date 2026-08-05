@@ -65,6 +65,23 @@ osg::ref_ptr<osg::Node> BuildLineStripNode(const std::vector<osg::Vec3>& points,
     geode->addDrawable(geometry.get());
     return geode;
 }
+
+// Constant-alpha blend override applied to a node's own StateSet, without touching the shared/cached geometry
+// it wraps (same technique used for the ghost's drag-time transparency). A no-op for alpha >= 1.0 (fully
+// opaque), so callers can call this unconditionally without extra state churn in the common case.
+void ApplyConstantAlpha(osg::Node* node, float alpha)
+{
+    if (!node || alpha >= 1.0f)
+        return;
+
+    osg::ref_ptr<osg::StateSet>   state_set   = node->getOrCreateStateSet();
+    osg::ref_ptr<osg::BlendColor> blend_color = new osg::BlendColor(osg::Vec4(1.0f, 1.0f, 1.0f, alpha));
+    osg::ref_ptr<osg::BlendFunc>  blend_func  = new osg::BlendFunc(osg::BlendFunc::CONSTANT_ALPHA, osg::BlendFunc::ONE_MINUS_CONSTANT_ALPHA);
+    state_set->setAttributeAndModes(blend_color.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+    state_set->setAttributeAndModes(blend_func.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+    state_set->setMode(GL_BLEND, osg::StateAttribute::ON);
+    state_set->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
+}
 }  // namespace
 
 void EntityTrajectoryRenderer::Init(osg::Group* scene_root)
@@ -270,6 +287,7 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
                 tx->addChild(CreateRedCylinderGeometry(kGizmoRadius, kGizmoRadius * 2.0, 12));
             else
                 tx->addChild(CreateGreenSphereGeometry(kVertexMarkerRadius, 8, 8));
+            ApplyConstantAlpha(tx.get(), static_cast<float>(traj.alpha_));
             group->addChild(tx.get());
         }
     }
@@ -313,22 +331,11 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
         // While this vehicle is being Ctrl-dragged along its path (keyframe editing), render it semi-
         // transparent (0.7 alpha) as the visual cue for the "ghost editing" state, additionally multiplied by
-        // the Trajectories tab's own Alpha slider. Constant-alpha blending is applied on the per-entity
-        // transform so the shared model node itself is not modified (same technique as the entity models in
-        // StudioGui::GetOSGBModelForScenarioObject()).
+        // the Trajectories tab's own Alpha slider.
         float ghost_alpha = static_cast<float>(traj.alpha_);
         if (entity_name == ghost_override_entity_)
             ghost_alpha *= 0.7f;
-        if (ghost_alpha < 1.0f)
-        {
-            osg::ref_ptr<osg::StateSet>   state_set   = ghost_tx->getOrCreateStateSet();
-            osg::ref_ptr<osg::BlendColor> blend_color = new osg::BlendColor(osg::Vec4(1.0f, 1.0f, 1.0f, ghost_alpha));
-            osg::ref_ptr<osg::BlendFunc>  blend_func  = new osg::BlendFunc(osg::BlendFunc::CONSTANT_ALPHA, osg::BlendFunc::ONE_MINUS_CONSTANT_ALPHA);
-            state_set->setAttributeAndModes(blend_color.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
-            state_set->setAttributeAndModes(blend_func.get(), osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
-            state_set->setMode(GL_BLEND, osg::StateAttribute::ON);
-            state_set->setRenderingHint(osg::StateSet::TRANSPARENT_BIN);
-        }
+        ApplyConstantAlpha(ghost_tx.get(), ghost_alpha);
 
         group->addChild(ghost_tx.get());
     }

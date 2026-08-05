@@ -3095,6 +3095,7 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
     }
 
     int imported = 0;
+    std::map<int, std::string> imported_id_to_entity;  // for the id/id+900000 pairing pass below
     for (auto& id_entry : samples_by_id)
     {
         std::vector<CsvSample>& samples = id_entry.second;
@@ -3157,7 +3158,24 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
         traj.SyncSpeedProfileEndpoints();
 
         entity_trajectories_[entity_name] = std::move(traj);
+        imported_id_to_entity[entity_trajectories_[entity_name].id_] = entity_name;
         imported++;
+    }
+
+    // Some traffic datasets pair a "base" trajectory (id X) with a shifted-id variant (id X + 900000) that
+    // represents the same vehicle for a different purpose; when both are present in this same import, dim the
+    // base one (id X) to make the pairing visually obvious (Trajectories tab Alpha slider, quantized 0.4).
+    for (const auto& id_entry : imported_id_to_entity)
+    {
+        int id_value = id_entry.first;
+        if (id_value <= 900000)
+            continue;
+        auto base_entry = imported_id_to_entity.find(id_value - 900000);
+        if (base_entry == imported_id_to_entity.end())
+            continue;
+        auto traj_it = entity_trajectories_.find(base_entry->second);
+        if (traj_it != entity_trajectories_.end())
+            traj_it->second.alpha_ = 0.4;
     }
 
     if (imported > 0)
