@@ -328,11 +328,14 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
     // Ghost marker: the vehicle's position along the path at the current virtual_time (Trajectory_Editing.md 9.3),
     // or the drag override while the user is sliding the ghost along the path (Trajectory_Editing_Enhancement.md 7.2).
+    // The speed profile's own s-t mapping always starts at local time 0, so virtual_time must be offset by
+    // start_time_ before being handed to EvaluateSAtTime() - otherwise the ghost is placed as if the vehicle
+    // had been running since global time 0, ignoring how far into its own trajectory it actually is right now.
     double s;
     if (entity_name == ghost_override_entity_)
         s = ghost_override_s_;
     else
-        s = traj.speed_profile_.EvaluateSAtTime(static_cast<double>(virtual_time));
+        s = traj.speed_profile_.EvaluateSAtTime(std::max(0.0, static_cast<double>(virtual_time) - traj.start_time_));
     s                     = std::max(0.0, std::min(s, total_len));
     EntityPose ghost_pose = traj.path_.Evaluate(s);
 

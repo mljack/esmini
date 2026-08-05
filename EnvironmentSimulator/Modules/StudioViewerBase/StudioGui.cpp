@@ -2149,7 +2149,10 @@ bool StudioGui::HandleGhostKeyframeClick()
         return false;
 
     EntityTrajectory& traj   = data_model_.entity_trajectories_[best_entity];
-    double            drag_t = static_cast<double>(data_model_.virtual_time_);
+    // Keyframes (like the rest of the speed profile) are in the trajectory's own local time, always starting
+    // at 0 regardless of when it appears on the shared timeline, so the global virtual_time_ must be offset
+    // by start_time_ before being used as/compared against a keyframe's t.
+    double            drag_t = static_cast<double>(data_model_.virtual_time_) - traj.start_time_;
 
     // Neighbour keyframe blocking bounds (finalized decision: a keyframe's s must never cross an adjacent
     // keyframe's s, in either direction) plus "am I updating an existing keyframe at this time?".
@@ -3139,7 +3142,7 @@ void StudioGui::RenderTrajectoriesTab()
 
                         ImGui::TableSetColumnIndex(3);
                         if (ImGui::SmallButton("Go"))
-                            data_model_.virtual_time_ = static_cast<float>(kf.t);
+                            data_model_.virtual_time_ = static_cast<float>(traj.start_time_ + kf.t);  // kf.t is local time; virtual_time_ is global
                         ImGui::SameLine();
                         if (ImGui::SmallButton("Delete"))
                             kf_to_delete = static_cast<int>(i);
