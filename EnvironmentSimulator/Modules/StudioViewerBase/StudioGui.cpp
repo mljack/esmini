@@ -3422,6 +3422,11 @@ void StudioGui::RenderMenuBar()
                 else
                 {
                     data_model_.xosc_path_ = file_path;
+                    // A brand-new OpenSCENARIO path was just picked (first Save, or Save As), so any
+                    // previously-derived/loaded traj_json_path_ (which could be left over from an earlier,
+                    // differently-named scenario, e.g. from clicking "Save Trajectories" while xosc_path_ was
+                    // still empty) no longer matches it and must be re-derived below rather than reused as-is.
+                    data_model_.traj_json_path_.clear();
                 }
             }
             if (to_save_file)
