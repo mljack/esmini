@@ -104,24 +104,27 @@ void EntityTrajectoryRenderer::SetSelectedPoint(const std::string& entity_name, 
     selected_point_index_  = point_index;
 }
 
-osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::GetOrLoadGhostModel()
+osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::GetOrLoadGhostModel(const std::string& entry_name)
 {
-    if (!ghost_model_load_attempted_)
+    const std::string& key = entry_name.empty() ? std::string(kDefaultVehicleEntry) : entry_name;
+
+    auto found = ghost_models_.find(key);
+    if (found != ghost_models_.end())
+        return found->second;
+
+    osg::ref_ptr<osg::Node> model = LoadTrajectoryVehicleModel(key);
+    if (!model)
     {
-        ghost_model_load_attempted_ = true;
-        ghost_model_                = LoadDefaultTrajectoryVehicleModel();
-        if (!ghost_model_)
-        {
-            LOG("EntityTrajectoryRenderer: failed to load the default ghost marker vehicle model (entry [%s]); "
-                "falling back to a generic sphere marker",
-                kDefaultVehicleEntry);
-            ghost_model_ = CreateGreenSphereGeometry(1.0, 12, 12);
-        }
+        LOG("EntityTrajectoryRenderer: failed to load ghost marker vehicle model (entry [%s]); falling back to a "
+            "generic sphere marker",
+            key.c_str());
+        model = CreateGreenSphereGeometry(1.0, 12, 12);
     }
-    return ghost_model_;
+    ghost_models_[key] = model;
+    return model;
 }
 
-osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::LoadDefaultTrajectoryVehicleModel() const
+osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::LoadTrajectoryVehicleModel(const std::string& entry_name) const
 {
     std::vector<std::string> catalog_candidates;
     catalog_candidates.push_back(std::string("resources/") + kDefaultCatalogRelPath);
@@ -154,7 +157,7 @@ osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::LoadDefaultTrajectoryVehicleMo
     std::string model3d;
     for (pugi::xml_node vehicle : catalog_doc.child("OpenSCENARIO").child("Catalog").children("Vehicle"))
     {
-        if (std::string(vehicle.attribute("name").as_string("")) == kDefaultVehicleEntry)
+        if (std::string(vehicle.attribute("name").as_string("")) == entry_name)
         {
             model3d = vehicle.attribute("model3d").as_string("");
             break;
@@ -163,7 +166,7 @@ osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::LoadDefaultTrajectoryVehicleMo
 
     if (model3d.empty())
     {
-        LOG("EntityTrajectoryRenderer: entry [%s] not found (or has no model3d) in [%s]", kDefaultVehicleEntry, kDefaultCatalogRelPath);
+        LOG("EntityTrajectoryRenderer: entry [%s] not found (or has no model3d) in [%s]", entry_name.c_str(), kDefaultCatalogRelPath);
         return nullptr;
     }
 
@@ -187,7 +190,7 @@ osg::ref_ptr<osg::Node> EntityTrajectoryRenderer::LoadDefaultTrajectoryVehicleMo
         }
     }
 
-    LOG("EntityTrajectoryRenderer: found catalog entry [%s] but failed to load its model file [%s]", kDefaultVehicleEntry, model3d.c_str());
+    LOG("EntityTrajectoryRenderer: found catalog entry [%s] but failed to load its model file [%s]", entry_name.c_str(), model3d.c_str());
     return nullptr;
 }
 
@@ -287,7 +290,7 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
     ghost_states_[entity_name] = GhostState{s, ghost_pose};
 
-    osg::ref_ptr<osg::Node> ghost_model = GetOrLoadGhostModel();
+    osg::ref_ptr<osg::Node> ghost_model = GetOrLoadGhostModel(traj.vehicle_catalog_entry_name_);
     if (ghost_model.valid())
     {
         osg::ref_ptr<osg::PositionAttitudeTransform> ghost_tx = new osg::PositionAttitudeTransform();

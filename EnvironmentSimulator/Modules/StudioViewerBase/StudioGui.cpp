@@ -1397,6 +1397,14 @@ void StudioGui::HandleViewportContextMenu()
         if (it != data_model_.entity_trajectories_.end() && trajectory_context_point_index_ >= 0 &&
             static_cast<size_t>(trajectory_context_point_index_) < it->second.path_.points_.size())
         {
+            // Continue picking, appending new points onto the end of the path until Esc/Enter (mirrors Add
+            // Trajectory's picking loop); which point was actually right-clicked doesn't matter, since new
+            // points are always appended at the end.
+            if (ImGui::MenuItem("Append Point"))
+            {
+                StartTrajectoryAppending(trajectory_context_entity_name_);
+            }
+
             bool can_delete = it->second.path_.points_.size() > 1;  // never leave a path with 0 points
             if (!can_delete)
                 ImGui::BeginDisabled(true);
@@ -1455,6 +1463,11 @@ void StudioGui::HandleViewportContextMenu()
                 ResolveEntityKeyframes(trajectory_insert_context_entity_name_);  // arc lengths changed
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete Trajectory"))
+        {
+            DeleteEntityTrajectory(trajectory_insert_context_entity_name_);
         }
         ImGui::EndPopup();
     }
@@ -1614,6 +1627,19 @@ void StudioGui::OpenAddTrajectoryDialog()
     add_trajectory_name_        = candidate;
     add_trajectory_init_speed_  = 0.0f;
     add_trajectory_interp_mode_ = 1;  // Spline by default
+
+    // Vehicle Type dropdown (mirrors OpenAddVehicleDialog(), independent state): defaults to "car_white" (the
+    // renderer's previous fixed default, Trajectory_Editing.md 7.2) when present, else the first entry.
+    add_trajectory_entry_options_ = GetVehicleCatalogEntryNames();
+    const std::string kDefaultEntry = "car_white";
+    auto              it = std::find(add_trajectory_entry_options_.begin(), add_trajectory_entry_options_.end(), kDefaultEntry);
+    if (it != add_trajectory_entry_options_.end())
+        add_trajectory_entry_name_ = *it;
+    else if (!add_trajectory_entry_options_.empty())
+        add_trajectory_entry_name_ = add_trajectory_entry_options_.front();
+    else
+        add_trajectory_entry_name_.clear();
+
     add_trajectory_dialog_to_open_ = true;
 }
 
@@ -1633,6 +1659,21 @@ void StudioGui::HandleAddTrajectoryDialog()
     if (ImGui::BeginPopupModal("Add Trajectory", &add_trajectory_dialog_active_, ImGuiWindowFlags_AlwaysAutoResize))
     {
         ImGui::TextUnformatted("This creates a brand-new vehicle stored only in .traj.json, not in the OpenSCENARIO file.");
+
+        // Vehicle type (entryName) dropdown, same pattern as Add Vehicle (independent state/options).
+        ImGui::TextUnformatted("Vehicle Type (entryName)");
+        if (ImGui::BeginCombo("##add_trajectory_entry", add_trajectory_entry_name_.c_str()))
+        {
+            for (const auto& entry : add_trajectory_entry_options_)
+            {
+                bool is_selected = (entry == add_trajectory_entry_name_);
+                if (ImGui::Selectable(entry.c_str(), is_selected))
+                    add_trajectory_entry_name_ = entry;
+                if (is_selected)
+                    ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
 
         // Entity name input
         ImGui::TextUnformatted("Name");
@@ -1678,6 +1719,7 @@ void StudioGui::HandleAddTrajectoryDialog()
                 (add_trajectory_interp_mode_ == 0)   ? EntityPath::InterpMode::LINEAR
                 : (add_trajectory_interp_mode_ == 2) ? EntityPath::InterpMode::CLOTHOID
                                                       : EntityPath::InterpMode::CATMULL_ROM;
+            traj.vehicle_catalog_entry_name_ = add_trajectory_entry_name_;
 
             // Start and end speed points are always created together: the start's s is fixed at 0, the end's
             // s is kept in sync with the path's total length as points are picked/dragged (both are 0 for now
@@ -1720,6 +1762,19 @@ void StudioGui::StartTrajectoryPicking(const std::string& entity_name)
 
     trajectory_picking_active_       = true;
     trajectory_picking_entity_name_  = entity_name;
+    trajectory_picking_is_append_    = false;
+}
+
+void StudioGui::StartTrajectoryAppending(const std::string& entity_name)
+{
+    auto it = data_model_.entity_trajectories_.find(entity_name);
+    if (it == data_model_.entity_trajectories_.end())
+        return;
+
+    StartTrajectoryPicking(entity_name);  // shared mutual-exclusivity + base state setup
+    trajectory_picking_is_append_         = true;
+    trajectory_picking_start_point_count_ = it->second.path_.points_.size();
+    trajectory_picking_start_path_length_ = it->second.path_.GetTotalLength();
 }
 
 void StudioGui::CommitTrajectoryPickingPoint()
@@ -1763,12 +1818,38 @@ void StudioGui::FinishTrajectoryPicking()
         return;
     }
 
+    if (trajectory_picking_is_append_ && it->second.path_.points_.size() <= trajectory_picking_start_point_count_)
+    {
+        // Append session with no newly-added points yet: ignore Enter, same rule as above.
+        return;
+    }
+
     trajectory_picking_active_ = false;
     trajectory_renderer_.ClearPickingPreview();
 
-    // Whole Add Trajectory session = one undo step (Trajectory_Editing.md section 11.5); the Esc-based
-    // per-point undo during picking (CancelTrajectoryPickingPoint()) is a separate, local-only mechanism that
-    // never touches the global trajectory undo stack.
+    if (trajectory_picking_is_append_)
+    {
+        // Keep the newly appended path segment moving at the previous constant tail speed, adding at most one
+        // new speed profile point: if the profile was still actively transitioning right at the old path end
+        // (last two points differ by more than 0.3 m/s), freeze that transition there with a new point at the
+        // OLD path length; otherwise the tail was already essentially flat and no extra point is needed.
+        EntitySpeedProfile& sp = it->second.speed_profile_;
+        if (sp.points_.size() >= 2)
+        {
+            size_t n    = sp.points_.size();
+            double diff = std::abs(sp.points_[n - 1].speed - sp.points_[n - 2].speed);
+            if (diff > 0.3)
+                sp.InsertPoint(trajectory_picking_start_path_length_, sp.points_[n - 1].speed);
+        }
+        it->second.SyncSpeedProfileEndpoints();
+        data_model_.trajectories_modified_ = true;
+        trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
+        ResolveEntityKeyframes(trajectory_picking_entity_name_);
+    }
+
+    // Whole Add Trajectory / Append Point session = one undo step (Trajectory_Editing.md section 11.5); the
+    // Esc-based per-point undo during picking (CancelTrajectoryPickingPoint()) is a separate, local-only
+    // mechanism that never touches the global trajectory undo stack.
     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
@@ -1777,12 +1858,24 @@ void StudioGui::CancelTrajectoryPickingPoint()
     if (!trajectory_picking_active_)
         return;
 
-    auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
-    if (it != data_model_.entity_trajectories_.end() && !it->second.path_.points_.empty())
+    auto   it            = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
+    size_t baseline_count = trajectory_picking_is_append_ ? trajectory_picking_start_point_count_ : 0;
+    bool   has_new_point  = it != data_model_.entity_trajectories_.end() && it->second.path_.points_.size() > baseline_count;
+
+    if (has_new_point)
     {
         it->second.path_.points_.pop_back();
         it->second.SyncSpeedProfileEndpoints();  // the end speed point's s tracks the path's total length
         trajectory_renderer_.MarkDirty(trajectory_picking_entity_name_);
+        return;
+    }
+
+    if (trajectory_picking_is_append_)
+    {
+        // Appending to an already-existing entity: nothing new was added this session, so just abort without
+        // touching any of its pre-existing points (never destroy the entity, unlike the Add Trajectory case).
+        trajectory_picking_active_ = false;
+        trajectory_renderer_.ClearPickingPreview();
         return;
     }
 
@@ -1791,6 +1884,50 @@ void StudioGui::CancelTrajectoryPickingPoint()
     trajectory_renderer_.RemoveEntity(trajectory_picking_entity_name_);
     trajectory_picking_active_ = false;
     trajectory_renderer_.ClearPickingPreview();
+}
+
+void StudioGui::DeleteEntityTrajectory(const std::string& entity_name)
+{
+    data_model_.RemoveEntityTrajectory(entity_name);
+    trajectory_renderer_.RemoveEntity(entity_name);
+
+    if (trajectory_picking_active_ && trajectory_picking_entity_name_ == entity_name)
+    {
+        trajectory_picking_active_ = false;
+        trajectory_renderer_.ClearPickingPreview();
+    }
+    if (trajectory_point_selected_ && trajectory_selected_entity_name_ == entity_name)
+    {
+        trajectory_point_selected_       = false;
+        trajectory_selected_point_index_ = -1;
+        trajectory_selected_entity_name_.clear();
+    }
+    if (trajectory_point_drag_active_ && trajectory_drag_entity_name_ == entity_name)
+    {
+        trajectory_point_drag_active_ = false;
+        trajectory_drag_point_index_  = -1;
+        trajectory_drag_entity_name_.clear();
+    }
+    if (speed_point_selected_ && speed_selected_entity_name_ == entity_name)
+    {
+        speed_point_selected_       = false;
+        speed_selected_point_index_ = -1;
+        speed_selected_entity_name_.clear();
+    }
+    if (speed_point_drag_active_ && speed_drag_entity_name_ == entity_name)
+    {
+        speed_point_drag_active_ = false;
+        speed_drag_point_index_  = -1;
+        speed_drag_entity_name_.clear();
+    }
+    if (ghost_keyframe_drag_active_ && ghost_drag_entity_name_ == entity_name)
+    {
+        ghost_keyframe_drag_active_ = false;
+        trajectory_renderer_.ClearGhostOverride();
+        trajectory_renderer_.ClearReachableRange();
+    }
+
+    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
 bool StudioGui::HandleTrajectoryPointClick()
@@ -2131,7 +2268,8 @@ bool StudioGui::HandleTrajectoryPointRightClick()
     UpdateMousePositionFromWorld();
 
     const double kPointHitRadius = 2.0;  // meters; matches HandleTrajectoryPointClick()'s left-click radius
-    const double kPathHitRadius  = 3.0;  // a bit more forgiving since the path line itself is thin
+    const double kPathHitRadius  = 1.5;  // half of the original 3.0m (user-requested tightening of the Insert
+                                          // Point hit test, since it was too easy to trigger by mistake)
 
     // On/near an existing control point takes priority over "near the path in general": Delete Point.
     std::string best_entity;
@@ -2252,33 +2390,61 @@ void StudioGui::RenderTrajectoriesTab()
         EntityTrajectory&   traj = entry.second;
 
         ImGui::PushID(name.c_str());
-        if (ImGui::CollapsingHeader(name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+        bool header_open = ImGui::CollapsingHeader(name.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+        // Without this, the header (whose clickable row spans the full window width) captures the click for
+        // any widget drawn on top of the same row, so the "x" button below would also toggle the header
+        // open/closed instead of (only) deleting the trajectory.
+        ImGui::SetItemAllowOverlap();
+
+        // Small red "x" button on the same row as the header title, right-aligned, to delete the whole
+        // trajectory - moved off its own separate "Delete" button (previously the first thing inside the
+        // header body) so it's reachable without expanding the section. Drawn manually (instead of
+        // SmallButton, which hard-codes FramePadding.y to 0) so the "x" glyph itself can be nudged up a
+        // couple of pixels within the button box - ImGui always centers a button's text, so there is no
+        // built-in way to offset just the glyph while keeping the button's own position/size unchanged.
+        ImGui::SameLine(ImGui::GetWindowWidth() - 30.0f);
+        ImVec2 delete_btn_size(16.0f, 16.0f);
+        ImVec2 delete_btn_pos = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##delete_trajectory", delete_btn_size);
+        bool delete_btn_hovered = ImGui::IsItemHovered();
+        bool delete_btn_active  = ImGui::IsItemActive();
+        if (ImGui::IsItemClicked())
+            entity_to_delete = name;
+
+        ImU32 delete_btn_color = delete_btn_active   ? IM_COL32(140, 25, 25, 255)
+                                 : delete_btn_hovered ? IM_COL32(230, 50, 50, 255)
+                                                      : IM_COL32(178, 38, 38, 255);
+        ImDrawList* draw_list  = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(delete_btn_pos, delete_btn_pos + delete_btn_size, delete_btn_color, 3.0f);
+        ImVec2 x_text_size = ImGui::CalcTextSize("x");
+        ImVec2 x_text_pos  = ImVec2(delete_btn_pos.x + (delete_btn_size.x - x_text_size.x) * 0.5f,
+                                    delete_btn_pos.y + (delete_btn_size.y - x_text_size.y) * 0.5f - 2.0);  // nudge glyph up 2px
+        draw_list->AddText(x_text_pos, IM_COL32(255, 255, 255, 255), "x");
+
+        if (header_open)
         {
             // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
             // editable only by dragging in the map view / the speed chart below, not via text input here.
             if (!traj.path_.points_.empty())
             {
                 const EntityPose& p0 = traj.path_.points_.front();
-                ImGui::Text("Initial position: x=%.2f, y=%.2f, road %d lane %d s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
+                ImGui::Text("Init pos: x=%.2f, y=%.2f, road %d lane %d s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
             }
             else
             {
-                ImGui::TextDisabled("Initial position: (no path points)");
+                ImGui::TextDisabled("Init pos: (no path points)");
             }
 
             double init_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.front().speed;
-            ImGui::Text("Initial speed: %.2f m/s", init_speed);
+            ImGui::SameLine();
+            ImGui::Text("   Init speed: %.2f m/s", init_speed);
 
             double length = traj.path_.GetTotalLength();
-            ImGui::Text("Path: %d points, %.1f m", static_cast<int>(traj.path_.points_.size()), length);
 
             // Keep the speed profile's start (s=0) / end (s=path length) anchors correct even if something
             // upstream forgot to call SyncSpeedProfileEndpoints() after changing the path (Trajectory_Editing.md
             // 8.2): idempotent, so calling it again here every frame is harmless.
             traj.SyncSpeedProfileEndpoints();
-
-            if (ImGui::Button("Delete"))
-                entity_to_delete = name;
 
             // Speed Profile editing (Trajectory_Editing.md 8.2): a chart for quick/approximate graphical
             // editing (drag existing points, double-click to insert one), plus a precise numeric table below
@@ -2289,16 +2455,29 @@ void StudioGui::RenderTrajectoriesTab()
             const double kSpeedAxisMax = 30.0;
             double       s_axis_max    = std::max(1.0, length);
 
-            ImGui::TextDisabled("Click a point to select it (turns red; its row below highlights too).");
-            ImGui::TextDisabled("Drag the selected point to change its speed; hold Ctrl to also change s.");
-            ImGui::TextDisabled("Right-click a point to delete it, or right-click empty space to insert one.");
             // NoMenus: disable ImPlot's own right-click context menu (axis/fit options), which would otherwise
             // intercept right clicks instead of letting our own Insert/Delete Point menu see them.
-            if (ImPlot::BeginPlot(("Speed Profile##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus))
+            ImVec2 plot_frame_min = ImGui::GetCursorScreenPos();
+            float  plot_width     = ImGui::GetContentRegionAvail().x;
+            if (ImPlot::BeginPlot(("Speed Profile (?)##" + name).c_str(), ImVec2(-1, 200), ImPlotFlags_NoBoxSelect | ImPlotFlags_NoMenus))
             {
                 ImPlot::SetupAxes("s (m)", "speed (m/s)");
                 ImPlot::SetupAxisLimits(ImAxis_X1, 0.0, s_axis_max, ImGuiCond_Always);
                 ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, kSpeedAxisMax, ImGuiCond_Always);
+
+                // The "(?)" is baked directly into ImPlot's own title text (drawn by ImPlot itself, so it can't
+                // be a separate hoverable ImGui widget); approximate its tooltip by hovering the whole title
+                // strip above the plot's canvas (ImPlot::GetPlotPos() is the canvas's top-left, below the
+                // title). GetPlotPos() locks the Setup phase, so it must come after all Setup* calls above.
+                ImVec2 title_area_max = ImVec2(plot_frame_min.x + plot_width, ImPlot::GetPlotPos().y);
+                if (ImGui::IsMouseHoveringRect(plot_frame_min, title_area_max))
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted("Click a point to select it (turns red; its row below highlights too).\n"
+                                           "Drag the selected point to change its speed; hold Ctrl to also change s.\n"
+                                           "Right-click a point to delete it, or right-click empty space to insert one.");
+                    ImGui::EndTooltip();
+                }
 
                 std::vector<double> xs, ys;
                 xs.reserve(traj.speed_profile_.points_.size());
@@ -2523,10 +2702,39 @@ void StudioGui::RenderTrajectoriesTab()
 
             // Precise numeric editing table, and the only way to delete a speed profile point. The first and
             // last rows are the fixed start/end anchors: their s is read-only and they cannot be deleted, so
-            // there are always at least 2 points spanning [0, path length].
+            // there are always at least 2 points spanning [0, path length]. Collapsed by default; "Add Point"
+            // sits on the header's own row so it stays reachable without expanding the table.
+            bool speed_table_open = ImGui::CollapsingHeader("Speed Profile Points");
+            ImGui::SameLine(ImGui::GetWindowWidth() - 90.0f);
+            if (ImGui::SmallButton("Add Point"))
+            {
+                // Insert at the midpoint between the last two points (rather than appending after the end
+                // anchor, which would leave it no longer the last / highest-s point).
+                size_t n = traj.speed_profile_.points_.size();
+                double new_s     = 0.0;
+                double new_speed = 0.0;
+                if (n >= 2)
+                {
+                    new_s     = 0.5 * (traj.speed_profile_.points_[n - 2].s + traj.speed_profile_.points_[n - 1].s);
+                    new_speed = 0.5 * (traj.speed_profile_.points_[n - 2].speed + traj.speed_profile_.points_[n - 1].speed);
+                }
+                traj.speed_profile_.InsertPoint(new_s, new_speed);
+                traj.SyncSpeedProfileEndpoints();
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+                if (speed_selected_entity_name_ == name)
+                {
+                    speed_point_selected_ = false;
+                    speed_selected_point_index_ = -1;
+                    speed_selected_entity_name_.clear();
+                }
+                ResolveEntityKeyframes(name);
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
             int  point_to_delete     = -1;
             bool commit_numeric_edit = false;  // set when an InputFloat below finishes an edit (see IsItemDeactivatedAfterEdit)
-            if (ImGui::BeginTable("##speed_profile_table", 3, ImGuiTableFlags_SizingStretchProp))
+            if (speed_table_open && ImGui::BeginTable("##speed_profile_table", 3, ImGuiTableFlags_SizingStretchProp))
             {
                 ImGui::TableSetupColumn("s (m)");
                 ImGui::TableSetupColumn("speed (m/s)");
@@ -2631,36 +2839,12 @@ void StudioGui::RenderTrajectoriesTab()
                 }
             }
 
-            if (ImGui::Button("Add Point"))
-            {
-                // Insert at the midpoint between the last two points (rather than appending after the end
-                // anchor, which would leave it no longer the last / highest-s point).
-                size_t n = traj.speed_profile_.points_.size();
-                double new_s     = 0.0;
-                double new_speed = 0.0;
-                if (n >= 2)
-                {
-                    new_s     = 0.5 * (traj.speed_profile_.points_[n - 2].s + traj.speed_profile_.points_[n - 1].s);
-                    new_speed = 0.5 * (traj.speed_profile_.points_[n - 2].speed + traj.speed_profile_.points_[n - 1].speed);
-                }
-                traj.speed_profile_.InsertPoint(new_s, new_speed);
-                traj.SyncSpeedProfileEndpoints();
-                data_model_.trajectories_modified_ = true;
-                trajectory_renderer_.MarkDirty(name);
-                if (speed_selected_entity_name_ == name)
-                {
-                    speed_point_selected_ = false;
-                    speed_selected_point_index_ = -1;
-                    speed_selected_entity_name_.clear();
-                }
-                ResolveEntityKeyframes(name);
-                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
-            }
-
             // Keyframes (Trajectory_Editing_Enhancement.md 7.4): the arrival-time constraints recorded by
             // dragging the ghost vehicle along its path in the map view. t is editable here (same re-solve
-            // path as dragging, finalized decision 9); s is edited by dragging the ghost only.
-            ImGui::SeparatorText("Keyframes");
+            // path as dragging, finalized decision 9); s is edited by dragging the ghost only. Collapsed by
+            // default, same as the speed profile points table above.
+            if (ImGui::CollapsingHeader("Keyframes"))
+            {
             if (traj.keyframes_.empty())
             {
                 ImGui::TextDisabled("No keyframes. Scrub the timeline, then Ctrl-drag the vehicle along its path to add one.");
@@ -2729,50 +2913,14 @@ void StudioGui::RenderTrajectoriesTab()
                     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
                 }
             }
+            }  // Keyframes CollapsingHeader
         }
         ImGui::PopID();
     }
 
     if (!entity_to_delete.empty())
     {
-        data_model_.RemoveEntityTrajectory(entity_to_delete);
-        trajectory_renderer_.RemoveEntity(entity_to_delete);
-        if (trajectory_picking_active_ && trajectory_picking_entity_name_ == entity_to_delete)
-            trajectory_picking_active_ = false;
-        if (trajectory_point_selected_ && trajectory_selected_entity_name_ == entity_to_delete)
-        {
-            trajectory_point_selected_ = false;
-            trajectory_selected_point_index_ = -1;
-            trajectory_selected_entity_name_.clear();
-        }
-        if (trajectory_point_drag_active_ && trajectory_drag_entity_name_ == entity_to_delete)
-        {
-            trajectory_point_drag_active_ = false;
-            trajectory_drag_point_index_  = -1;
-            trajectory_drag_entity_name_.clear();
-        }
-        if (speed_point_selected_ && speed_selected_entity_name_ == entity_to_delete)
-        {
-            speed_point_selected_ = false;
-            speed_selected_point_index_ = -1;
-            speed_selected_entity_name_.clear();
-        }
-        if (speed_point_drag_active_ && speed_drag_entity_name_ == entity_to_delete)
-        {
-            speed_point_drag_active_ = false;
-            speed_drag_point_index_  = -1;
-            speed_drag_entity_name_.clear();
-        }
-        if (ghost_keyframe_drag_active_ && ghost_drag_entity_name_ == entity_to_delete)
-        {
-            ghost_keyframe_drag_active_ = false;
-            trajectory_renderer_.ClearGhostOverride();
-            trajectory_renderer_.ClearReachableRange();
-        }
-
-        // Selection referencing the deleted entity has already been cleared above, so the captured snapshot
-        // is guaranteed consistent with the post-delete state (Trajectory_Editing.md section 11.5).
-        data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+        DeleteEntityTrajectory(entity_to_delete);
     }
 }
 
@@ -3468,6 +3616,53 @@ bool StudioGui::handle(const osgGA::GUIEventAdapter& ea, osgGA::GUIActionAdapter
                      (c == osgGA::GUIEventAdapter::KEY_Return || c == osgGA::GUIEventAdapter::KEY_KP_Enter))
             {
                 FinishTrajectoryPicking();
+            }
+            else if (!isKeyDown && !wantCaptureKeyboard && c == osgGA::GUIEventAdapter::KEY_Delete)
+            {
+                // Delete the currently selected path point or speed profile point (whichever is selected),
+                // mirroring the corresponding right-click "Delete Point" menu items/table row buttons.
+                if (trajectory_point_selected_)
+                {
+                    auto it = data_model_.entity_trajectories_.find(trajectory_selected_entity_name_);
+                    if (it != data_model_.entity_trajectories_.end() && trajectory_selected_point_index_ >= 0 &&
+                        static_cast<size_t>(trajectory_selected_point_index_) < it->second.path_.points_.size() &&
+                        it->second.path_.points_.size() > 1)  // never leave a path with 0 points
+                    {
+                        std::string entity_name = trajectory_selected_entity_name_;
+                        it->second.path_.RemovePoint(trajectory_selected_point_index_);
+                        it->second.SyncSpeedProfileEndpoints();  // removing a point changes the path's total length
+                        data_model_.trajectories_modified_ = true;
+                        trajectory_renderer_.MarkDirty(entity_name);
+                        trajectory_point_selected_       = false;
+                        trajectory_selected_point_index_ = -1;
+                        trajectory_selected_entity_name_.clear();
+                        ResolveEntityKeyframes(entity_name);  // arc lengths changed
+                        data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                    }
+                }
+                else if (speed_point_selected_)
+                {
+                    auto it = data_model_.entity_trajectories_.find(speed_selected_entity_name_);
+                    if (it != data_model_.entity_trajectories_.end() && speed_selected_point_index_ >= 0 &&
+                        static_cast<size_t>(speed_selected_point_index_) < it->second.speed_profile_.points_.size())
+                    {
+                        size_t index     = static_cast<size_t>(speed_selected_point_index_);
+                        bool   is_anchor = (index == 0) || (index == it->second.speed_profile_.points_.size() - 1);
+                        if (!is_anchor)  // the start/end anchors can never be deleted (Trajectory_Editing.md 8.2)
+                        {
+                            std::string entity_name = speed_selected_entity_name_;
+                            it->second.speed_profile_.RemovePoint(speed_selected_point_index_);
+                            it->second.SyncSpeedProfileEndpoints();
+                            data_model_.trajectories_modified_ = true;
+                            trajectory_renderer_.MarkDirty(entity_name);
+                            speed_point_selected_       = false;
+                            speed_selected_point_index_ = -1;
+                            speed_selected_entity_name_.clear();
+                            ResolveEntityKeyframes(entity_name);
+                            data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                        }
+                    }
+                }
             }
 
             // Legacy Ctrl shortcuts handling (can be removed if ImGui handles them, but keeping for safety)

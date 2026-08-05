@@ -93,13 +93,13 @@ private:
     double                            reachable_s_lo_ = 0.0;
     double                            reachable_s_hi_ = 0.0;
 
-    // Shared default vehicle model used for every ghost marker (Trajectory_Editing.md section 7.2): trajectory-
-    // editor-only vehicles have no xosc CatalogReference, so a single fixed VehicleCatalog.xosc entry is used
-    // for all of them instead of a per-entity 3D model lookup.
-    osg::ref_ptr<osg::Node> ghost_model_;
-    bool                    ghost_model_load_attempted_ = false;
+    // Vehicle models used for ghost markers (Trajectory_Editing.md section 7.2, extended to be per-entity by
+    // the Vehicle Type field on Add Trajectory): cached per VehicleCatalog.xosc entry name, so the same model
+    // is loaded only once even if several trajectories share an entry. Falls back to a green sphere for any
+    // entry that fails to load (missing catalog / model file).
+    std::map<std::string, osg::ref_ptr<osg::Node>> ghost_models_;
 
-    osg::ref_ptr<osg::Node> GetOrLoadGhostModel();
-    osg::ref_ptr<osg::Node> LoadDefaultTrajectoryVehicleModel() const;
+    osg::ref_ptr<osg::Node> GetOrLoadGhostModel(const std::string& entry_name);
+    osg::ref_ptr<osg::Node> LoadTrajectoryVehicleModel(const std::string& entry_name) const;
     void                    RebuildEntityGroup(const std::string& entity_name, const EntityTrajectory& traj, float virtual_time);
 };

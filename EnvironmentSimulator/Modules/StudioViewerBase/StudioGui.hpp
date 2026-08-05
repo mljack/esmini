@@ -132,6 +132,15 @@ private:
     void FinishTrajectoryPicking();
     void CancelTrajectoryPickingPoint();
 
+    // "Append Point" (right-click an existing path point in the map view): same continuous picking loop as
+    // above, but on an *already-existing* trajectory; see trajectory_picking_is_append_ for the differences.
+    void StartTrajectoryAppending(const std::string& entity_name);
+
+    // Shared cleanup for deleting an entity trajectory (used by the Trajectories tab's Delete button and the
+    // map view's right-click "Delete Trajectory" menu item): removes it from the data model and renderer,
+    // clears any selection/drag state that referenced it, and pushes one undo step.
+    void DeleteEntityTrajectory(const std::string& entity_name);
+
     // Dragging an existing path point in the map view (Trajectory_Editing.md section 7.4 / 6.3). A click only
     // selects/highlights the nearest point (shows a gizmo); a further click-drag starting on the already-
     // selected point's gizmo is what actually moves it, so a plain click never modifies the trajectory.
@@ -221,11 +230,22 @@ private:
     std::string add_trajectory_name_;
     float       add_trajectory_init_speed_     = 0.0f;
     int         add_trajectory_interp_mode_    = 1;  // 0=Linear, 1=Spline (default), 2=Clothoid
+    std::string              add_trajectory_entry_name_;     // Vehicle Type (VehicleCatalog.xosc entryName)
+    std::vector<std::string> add_trajectory_entry_options_;  // independent from add_vehicle_entry_options_
 
     // Continuous point-picking session state (section 6.1): trajectory_picking_active_ is true from the moment
     // the Add Trajectory dialog is confirmed until Enter commits or Esc cancels the whole thing.
     bool        trajectory_picking_active_ = false;
     std::string trajectory_picking_entity_name_;
+
+    // Set when the current picking session is "Append Point" on an *existing* trajectory (right-click a path
+    // point in the map view) rather than "Add Trajectory" building a brand-new one. Changes Esc/Enter-at-zero
+    // semantics: Esc must never pop/destroy points that existed before this session started, and Enter with
+    // no newly-added points is ignored rather than doing nothing to an (nonexistent) empty new entity.
+    bool   trajectory_picking_is_append_         = false;
+    size_t trajectory_picking_start_point_count_ = 0;
+    double trajectory_picking_start_path_length_ = 0.0;  // path length before this append session, used to
+                                                          // decide where to freeze the old tail speed (below)
 
     // Selection state (section 7.4): a click selects/highlights a point without modifying anything; a further
     // click-drag on the already-selected point is what actually moves it.

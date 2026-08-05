@@ -2714,6 +2714,10 @@ std::string StudioDataModel::TrajectoriesToJsonString() const
             {   "points",                                  speed_points_json}
         };
 
+        // Optional; empty means "use the renderer's fixed default" (backward-compatible with older files).
+        if (!traj.vehicle_catalog_entry_name_.empty())
+            entity_json["vehicle_catalog_entry"] = traj.vehicle_catalog_entry_name_;
+
         // Time keyframes (Trajectory_Editing_Enhancement.md, schema v2): only (t, s) is persisted; the world
         // position is derived from the path at render time and achieved_t/feasible are recomputed on load.
         if (!traj.keyframes_.empty())
@@ -2759,6 +2763,8 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
             traj.entity_name_ = it.key();
 
             const nlohmann::json& entity_json = it.value();
+
+            traj.vehicle_catalog_entry_name_ = entity_json.value("vehicle_catalog_entry", std::string());
 
             if (entity_json.contains("path") && entity_json["path"].contains("points"))
             {

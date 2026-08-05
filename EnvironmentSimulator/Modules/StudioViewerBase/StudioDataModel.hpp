@@ -152,6 +152,11 @@ public:
     EntityPath          path_;
     EntitySpeedProfile  speed_profile_;
 
+    // VehicleCatalog.xosc entry name used for this trajectory's ghost marker model (e.g. "car_white"); empty
+    // means "use the renderer's fixed default" (Trajectory_Editing.md section 7.2's original single-model
+    // behavior, kept as the fallback for old .traj.json files and for robustness if the entry disappears).
+    std::string vehicle_catalog_entry_name_;
+
     // Time keyframes sorted by t (Trajectory_Editing_Enhancement.md): user-specified arrival-time constraints
     // that ResolveKeyframes() turns into speed profile modifications via the Q0-Q3 cascade.
     std::vector<TrajectoryKeyframe> keyframes_;
