@@ -141,6 +141,12 @@ private:
     // clears any selection/drag state that referenced it, and pushes one undo step.
     void DeleteEntityTrajectory(const std::string& entity_name);
 
+    // Renames an entity trajectory (Trajectories tab "Name" field): delegates to
+    // StudioDataModel::RenameEntityTrajectory(), then fixes up any selection/drag/picking state that
+    // referenced the old name and the renderer's per-entity group, and pushes one undo step. No-op (false) if
+    // the rename was rejected (empty/duplicate new name).
+    bool RenameEntityTrajectory(const std::string& old_name, const std::string& new_name);
+
     // Shared cleanup after entity_trajectories_ has just been wholesale-replaced or cleared (File > Clear,
     // Load Trajectories): resets all trajectory selection/drag/picking UI state (which would otherwise
     // reference entities that no longer exist) and seeds a fresh undo baseline, since undoing back into

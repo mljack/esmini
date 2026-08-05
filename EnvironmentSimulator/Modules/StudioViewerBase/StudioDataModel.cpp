@@ -2654,6 +2654,28 @@ void StudioDataModel::RemoveEntityTrajectory(const std::string& entity_name)
         trajectories_modified_ = true;
 }
 
+bool StudioDataModel::RenameEntityTrajectory(const std::string& old_name, const std::string& new_name)
+{
+    if (old_name == new_name)
+        return true;
+    if (new_name.empty())
+        return false;
+
+    auto it = entity_trajectories_.find(old_name);
+    if (it == entity_trajectories_.end())
+        return false;
+    if (entity_trajectories_.count(new_name) > 0)
+        return false;
+
+    EntityTrajectory traj = std::move(it->second);
+    traj.entity_name_     = new_name;
+    entity_trajectories_.erase(it);
+    entity_trajectories_.emplace(new_name, std::move(traj));
+
+    trajectories_modified_ = true;
+    return true;
+}
+
 int StudioDataModel::NextUniqueTrajectoryId() const
 {
     int next_id = 1;

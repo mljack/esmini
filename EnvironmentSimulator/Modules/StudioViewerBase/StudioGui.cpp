@@ -1952,6 +1952,34 @@ void StudioGui::DeleteEntityTrajectory(const std::string& entity_name)
     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
+bool StudioGui::RenameEntityTrajectory(const std::string& old_name, const std::string& new_name)
+{
+    if (!data_model_.RenameEntityTrajectory(old_name, new_name))
+        return false;
+
+    // The renderer's per-entity group/ghost-state/dirty-flag maps are also keyed by name: drop the old one
+    // and mark the new key dirty so Update() (which iterates entity_trajectories_ every frame regardless of
+    // the dirty flag) builds a fresh group for it next frame instead of leaving an orphaned old-named one.
+    trajectory_renderer_.RemoveEntity(old_name);
+    trajectory_renderer_.MarkDirty(new_name);
+
+    if (trajectory_picking_active_ && trajectory_picking_entity_name_ == old_name)
+        trajectory_picking_entity_name_ = new_name;
+    if (trajectory_point_selected_ && trajectory_selected_entity_name_ == old_name)
+        trajectory_selected_entity_name_ = new_name;
+    if (trajectory_point_drag_active_ && trajectory_drag_entity_name_ == old_name)
+        trajectory_drag_entity_name_ = new_name;
+    if (speed_point_selected_ && speed_selected_entity_name_ == old_name)
+        speed_selected_entity_name_ = new_name;
+    if (speed_point_drag_active_ && speed_drag_entity_name_ == old_name)
+        speed_drag_entity_name_ = new_name;
+    if (ghost_keyframe_drag_active_ && ghost_drag_entity_name_ == old_name)
+        ghost_drag_entity_name_ = new_name;
+
+    data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+    return true;
+}
+
 void StudioGui::ResetTrajectoryInteractionStateAndUndoStacks()
 {
     trajectory_picking_active_       = false;
@@ -2455,6 +2483,9 @@ void StudioGui::RenderTrajectoriesTab()
     }
 
     std::string entity_to_delete;
+    // Deferred to after the loop below (like entity_to_delete above): entity_trajectories_ is keyed by name,
+    // so renaming mid-iteration (erase + re-insert under a new key) would invalidate the range-for's iterator.
+    std::string rename_from, rename_to;
 
     // Fetched once per call (not per entity) since it re-parses VehicleCatalog.xosc from disk; shared by every
     // entity's "Vehicle Type" combo below.
@@ -2526,6 +2557,28 @@ void StudioGui::RenderTrajectoriesTab()
             if (ImGui::IsItemDeactivatedAfterEdit())
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 
+            // Name: renames the trajectory (entity_trajectories_'s map key). Deferred to after the loop (see
+            // rename_from/rename_to above) since entity_trajectories_ is being iterated right now. Rejected
+            // silently (reverts to the current name next frame) if left empty or if it clashes with another
+            // trajectory's name - uniqueness is only checked among entity_trajectories_ itself, never against
+            // xosc ScenarioObject names (Trajectory_Editing.md 6.1/12).
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Name");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150.0f);
+            std::string name_buffer = name;
+            name_buffer.resize(256);
+            ImGui::InputText("##traj_name", name_buffer.data(), name_buffer.size());
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                std::string new_name = name_buffer.c_str();
+                if (!new_name.empty() && new_name != name && data_model_.entity_trajectories_.count(new_name) == 0)
+                {
+                    rename_from = name;
+                    rename_to   = new_name;
+                }
+            }
+
             // Start Time: the global virtual_time_ at which this vehicle first appears (its own speed profile
             // time still starts at 0 regardless) - real captured data often has vehicles entering partway
             // through a recording rather than at t=0.
@@ -2569,11 +2622,22 @@ void StudioGui::RenderTrajectoriesTab()
                 ImGui::EndCombo();
             }
 
+            // Hide: master visibility switch, independent of Show Path Point/Show Speed Point (which only
+            // affect per-point editing) - while on, nothing is rendered for this trajectory at all.
+            ImGui::SameLine();
+            bool hidden = traj.hidden_;
+            if (ImGui::Checkbox("Hide", &hidden))
+            {
+                traj.hidden_                       = hidden;
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+            }
+
             // Show Path Point / Show Speed Point (Trajectory_Editing.md, extended): disable all path/speed
             // point editing UI for this entity while off, while still rendering the path/speed curve itself.
             // Off by default for CSV-imported trajectories, which can have hundreds of raw points where
             // per-point editing/markers would be impractical (see StudioDataModel::ImportTrajectoriesCsv()).
-            ImGui::SameLine();
             bool show_path_points = traj.show_path_points_;
             if (ImGui::Checkbox("Show Path Point", &show_path_points))
             {
@@ -2625,34 +2689,6 @@ void StudioGui::RenderTrajectoriesTab()
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             }
 
-            // Hide: master visibility switch, independent of Show Path Point/Show Speed Point (which only
-            // affect per-point editing) - while on, nothing is rendered for this trajectory at all.
-            ImGui::SameLine();
-            bool hidden = traj.hidden_;
-            if (ImGui::Checkbox("Hide", &hidden))
-            {
-                traj.hidden_                        = hidden;
-                data_model_.trajectories_modified_ = true;
-                trajectory_renderer_.MarkDirty(name);
-                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
-            }
-
-            // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
-            // editable only by dragging in the map view / the speed chart below, not via text input here.
-            if (!traj.path_.points_.empty())
-            {
-                const EntityPose& p0 = traj.path_.points_.front();
-                ImGui::Text("Init pos: x=%.2f, y=%.2f, road %d, lane %d, s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
-            }
-            else
-            {
-                ImGui::TextDisabled("Init pos: (no path points)");
-            }
-
-            double init_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.front().speed;
-            ImGui::SameLine();
-            ImGui::Text("; Init speed: %.2f m/s", init_speed);
-
             // Alpha: rendering opacity for the path line/ghost marker, quantized to 6 steps (0.0-1.0 in 0.2
             // increments) via an int slider over sixths rather than a free float, per the requested "6 档".
             ImGui::SameLine();
@@ -2670,6 +2706,23 @@ void StudioGui::RenderTrajectoriesTab()
             }
             if (ImGui::IsItemDeactivatedAfterEdit())
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+
+
+            // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
+            // editable only by dragging in the map view / the speed chart below, not via text input here.
+            if (!traj.path_.points_.empty())
+            {
+                const EntityPose& p0 = traj.path_.points_.front();
+                ImGui::Text("Init pos: x=%.2f, y=%.2f, road %d, lane %d, s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
+            }
+            else
+            {
+                ImGui::TextDisabled("Init pos: (no path points)");
+            }
+
+            double init_speed = traj.speed_profile_.points_.empty() ? 0.0 : traj.speed_profile_.points_.front().speed;
+            ImGui::SameLine();
+            ImGui::Text("; Init speed: %.2f m/s", init_speed);
 
             double length = traj.path_.GetTotalLength();
 
@@ -3176,6 +3229,10 @@ void StudioGui::RenderTrajectoriesTab()
     if (!entity_to_delete.empty())
     {
         DeleteEntityTrajectory(entity_to_delete);
+    }
+    else if (!rename_from.empty())
+    {
+        RenameEntityTrajectory(rename_from, rename_to);
     }
 }
 

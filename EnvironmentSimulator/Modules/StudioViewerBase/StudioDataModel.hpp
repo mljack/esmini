@@ -288,6 +288,12 @@ public:
     EntityTrajectory& CreateEntityTrajectory(const std::string& entity_name);
     void              RemoveEntityTrajectory(const std::string& entity_name);
 
+    // Renames entity_trajectories_'s map key (== EntityTrajectory::entity_name_) from old_name to new_name.
+    // Fails (returns false, no change) if old_name doesn't exist, new_name is empty, or new_name already
+    // names a different trajectory - uniqueness is only checked among entity_trajectories_ itself (Trajectory_
+    // Editing.md 6.1/12: trajectory names are independent of xosc ScenarioObject names).
+    bool RenameEntityTrajectory(const std::string& old_name, const std::string& new_name);
+
     // One past the highest id_ currently in use across entity_trajectories_ (1 if empty), for assigning a
     // fresh, presumably-unique id_ to a newly-created trajectory (Trajectories tab ID field).
     int NextUniqueTrajectoryId() const;
