@@ -182,6 +182,27 @@ public:
     // the Trajectories tab.
     double alpha_ = 1.0;
 
+    // The global virtual_time_ at which this vehicle first appears (its local speed-profile time, which
+    // EvaluateTimeAtS()/EvaluateSAtTime() always keep starting at 0, is offset by this much to place it on
+    // the shared timeline). Real captured data often has vehicles entering partway through a recording
+    // (Trajectory_Editing.md, "delayed appearance" design discussion) rather than at t=0.
+    double start_time_ = 0.0;
+
+    // Whether this trajectory should be shown in the 3D view (path line, points, keyframes, ghost - all
+    // together) at the given global virtual_time: always true at virtual_time == 0 (COMPOSER's "overview/edit
+    // everything" state), otherwise only within [start_time_, start_time_ + duration] plus a small epsilon
+    // covering both endpoints. total_length is passed in rather than recomputed here since callers (the
+    // renderer, StudioGui's 3D-view hit-testers) typically already have it on hand once per frame/click.
+    bool IsVisibleAtTime(float virtual_time, double total_length) const
+    {
+        if (virtual_time <= 0.0f)
+            return true;
+        const double kTimeEpsilon = 0.05;  // seconds; matches the timeline slider's own 0.05s snapping
+        double        duration     = speed_profile_.EvaluateTimeAtS(total_length);
+        return static_cast<double>(virtual_time) >= start_time_ - kTimeEpsilon &&
+               static_cast<double>(virtual_time) <= start_time_ + duration + kTimeEpsilon;
+    }
+
     bool HasPath() const
     {
         return !path_.points_.empty();

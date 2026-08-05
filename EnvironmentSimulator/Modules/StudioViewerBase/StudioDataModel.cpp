@@ -2745,6 +2745,10 @@ std::string StudioDataModel::TrajectoriesToJsonString() const
         if (traj.alpha_ < 1.0)
             entity_json["alpha"] = RoundToDecimals(traj.alpha_, 2);
 
+        // Optional; defaults to 0.0 (appears at the very start of the timeline) when absent.
+        if (traj.start_time_ != 0.0)
+            entity_json["start_time"] = RoundToDecimals(traj.start_time_, 3);
+
         // Time keyframes (Trajectory_Editing_Enhancement.md, schema v2): only (t, s) is persisted; the world
         // position is derived from the path at render time and achieved_t/feasible are recomputed on load.
         if (!traj.keyframes_.empty())
@@ -2796,6 +2800,7 @@ bool StudioDataModel::TrajectoriesFromJsonString(const std::string& json_text)
             traj.show_speed_points_          = entity_json.value("show_speed_points", true);
             traj.hidden_                     = entity_json.value("hidden", false);
             traj.alpha_                      = entity_json.value("alpha", 1.0);
+            traj.start_time_                 = entity_json.value("start_time", 0.0);
             // -1 is a sentinel meaning "no explicit id in this file" (older files predating the id_ field);
             // resolved to an actually-unique value in the post-processing pass below.
             traj.id_ = entity_json.value("id", -1);
@@ -2991,9 +2996,11 @@ bool StudioDataModel::ExportTrajectoriesCsv(const std::string& path) const
             double     vx    = speed * std::cos(pose.h);
             double     vy    = speed * std::sin(pose.h);
 
-            file << id << ',' << t << ',' << pose.x << ',' << pose.y << ',' << pose.z << ',' << dims.length << ',' << dims.width << ','
-                << dims.height << ',' << pose.h << ",0,0," << vx << ',' << vy << ",0,0,0,0,vehicle,car,," << (is_ego ? "Y" : "N") << ',' << id
-                << "\n";
+            // Time is global/absolute in this CSV format, so it's offset by the trajectory's own start_time_
+            // (when it first appears on the shared timeline), not just its local 0-based speed-profile time.
+            file << id << ',' << (traj.start_time_ + t) << ',' << pose.x << ',' << pose.y << ',' << pose.z << ',' << dims.length << ','
+                << dims.width << ',' << dims.height << ',' << pose.h << ",0,0," << vx << ',' << vy << ",0,0,0,0,vehicle,car,,"
+                << (is_ego ? "Y" : "N") << ',' << id << "\n";
         }
         exported++;
     }
@@ -3117,6 +3124,10 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
         // Trajectories tab's Show Path Point/Show Speed Point checkboxes).
         traj.show_path_points_  = false;
         traj.show_speed_points_ = false;
+        // Real captured data often has a vehicle entering partway through the recording rather than at the
+        // very start; the first (now time-sorted) sample's own Time value becomes this trajectory's global
+        // appearance time (its speed profile's own local time still starts at 0, as usual).
+        traj.start_time_ = samples.front().time;
         // Reuse the CSV's own ID when it parses as an integer, so a round-tripped export/import keeps the
         // same id; fall back to an auto-assigned one if the CSV used a non-numeric identifier.
         try

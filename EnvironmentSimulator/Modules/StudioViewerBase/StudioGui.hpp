@@ -236,6 +236,7 @@ private:
     std::string add_trajectory_name_;
     float       add_trajectory_init_speed_     = 0.0f;
     int         add_trajectory_interp_mode_    = 1;  // 0=Linear, 1=Spline (default), 2=Clothoid
+    float       add_trajectory_start_time_     = 0.0f;  // defaults to the current virtual_time_ on open
     std::string              add_trajectory_entry_name_;     // Vehicle Type (VehicleCatalog.xosc entryName)
     std::vector<std::string> add_trajectory_entry_options_;  // independent from add_vehicle_entry_options_
 

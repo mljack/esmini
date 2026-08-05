@@ -225,10 +225,28 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
     // Master visibility switch (Trajectories tab "Hide" checkbox): leave the group mounted but empty.
     if (traj.hidden_)
+    {
+        ghost_states_.erase(entity_name);
         return;
+    }
 
     if (traj.path_.points_.empty())
         return;
+
+    double total_len = traj.path_.GetTotalLength();
+
+    // Time-windowed 3D-view visibility (finalized behavior): virtual_time == 0 is COMPOSER's "overview/edit
+    // everything" state, where every trajectory is shown regardless of start_time_. For any virtual_time > 0,
+    // only trajectories whose [start_time_, start_time_ + duration] window (+/- a small epsilon covering both
+    // endpoints) contains the current time are shown at all in the 3D view - path line, points, keyframes and
+    // ghost together, not just the ghost - so an inactive one is also unreachable there for
+    // selection/editing (StudioGui's click handlers apply the same EntityTrajectory::IsVisibleAtTime() check).
+    // It always remains editable via the Trajectories tab regardless of virtual_time.
+    if (!traj.IsVisibleAtTime(virtual_time, total_len))
+    {
+        ghost_states_.erase(entity_name);
+        return;
+    }
 
     // Path line (dense, curve-following samples rather than the raw sparse control points), tinted by the
     // Trajectories tab's Alpha slider.
@@ -310,7 +328,6 @@ void EntityTrajectoryRenderer::RebuildEntityGroup(const std::string& entity_name
 
     // Ghost marker: the vehicle's position along the path at the current virtual_time (Trajectory_Editing.md 9.3),
     // or the drag override while the user is sliding the ghost along the path (Trajectory_Editing_Enhancement.md 7.2).
-    double total_len = traj.path_.GetTotalLength();
     double s;
     if (entity_name == ghost_override_entity_)
         s = ghost_override_s_;

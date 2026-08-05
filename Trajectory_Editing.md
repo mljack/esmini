@@ -741,4 +741,18 @@ void StudioGui::ApplyTrajectorySelectionSnapshot(const TrajectorySelectionSnapsh
 - **Add Trajectory 的 Vehicle Type 下拉框**：新增 `EntityTrajectory::vehicle_catalog_entry_name_` 字段（持久化进 `.traj.json` 的可选字段 `vehicle_catalog_entry`，旧文件缺省为空字符串，向后兼容），Add Trajectory 弹窗新增与 Add Vehicle 完全独立的一套下拉框状态（`add_trajectory_entry_name_`/`add_trajectory_entry_options_`），默认选中 `car_white`（找不到则退回第一个选项）。`EntityTrajectoryRenderer` 的 ghost 模型加载从"全局唯一、启动时加载一次"（`ghost_model_`/`GetOrLoadGhostModel()`）改为按 `entryName` 缓存的 `ghost_models_` map（`GetOrLoadGhostModel(entry_name)`/`LoadTrajectoryVehicleModel(entry_name)`），使不同 trajectory 可以显示不同车型的 ghost，某个 entry 加载失败时只影响该 entry（回退到绿色球体），不影响其它已加载成功的车型。
 - **Trajectories Tab 布局调整**：每个 trajectory 的整体 Delete 按钮从 CollapsingHeader 内部第一行移到了 header 标题栏同一行、右对齐、红色小按钮（字样 `x`）；Speed Profile 图表上方原本常驻的三行 `TextDisabled` 提示文字，改为标题 "Speed Profile" 右侧的 `(?)` 悬浮提示（新增的 `HelpMarker()` 辅助函数，匿名命名空间，[StudioGui.cpp](EnvironmentSimulator/Modules/StudioViewerBase/StudioGui.cpp#L120) 附近）；数值速度点表格与 Keyframes 表格都改为默认折叠的 `CollapsingHeader`（原来是恒定展开/`SeparatorText`），"Add Point" 按钮移到了速度点表格 header 的同一行、右对齐；"Init pos"/"Init speed"（原 "Initial position"/"Initial speed"）合并到同一行显示。
 
+## 18. 延迟出现时刻（`start_time_`）与基于 `virtual_time_` 的 3D 视图可见性窗口
+
+背景：实际采集数据里车辆经常不是从场景开始就存在的（如 `trajectories_test.csv` 里不同 `ID` 的 `Time` 起点各不相同），而此前 `entity_trajectories_` 里每条轨迹都隐含"从全局 `virtual_time_ = 0` 就存在"的假设，且 `virtual_time_` 超出轨迹自身时长后 ghost 会一直卡在终点不消失。
+
+- **`EntityTrajectory::start_time_`**（`StudioDataModel.hpp`）：新增字段，表示这条轨迹在全局 `virtual_time_` 时间轴上首次出现的时刻；轨迹自身的 `speed_profile_`/`path_` 时间参数化（`EvaluateTimeAtS`/`EvaluateSAtTime`）不变，仍然从局部时间 0 开始，渲染/命中测试时用 `virtual_time_ - start_time_` 做一次时间平移。持久化为 `.traj.json` 可选字段 `start_time`（默认 0，向后兼容）。
+- **`EntityTrajectory::IsVisibleAtTime(virtual_time, total_length)`**（同文件）：统一的可见性判定，供渲染器与 3D 视图的所有命中测试共用，避免逻辑分叉：
+  - `virtual_time_ == 0`：始终可见（COMPOSER 下 0 时刻是"总览/可编辑所有轨迹"的特殊状态）。
+  - `virtual_time_ > 0`：仅当 `virtual_time_` 落在 `[start_time_, start_time_ + duration]`（前后各加 0.05s 容差，覆盖两端点）内才可见；不可见时**整条轨迹**（路径线、路径点、关键帧标记、ghost）在 3D 视图中都不渲染，也不能通过 3D 视图选中/编辑——但 Trajectories Tab 的所有编辑功能始终可用，不受 `virtual_time_` 影响。
+  - `EntityTrajectoryRenderer::RebuildEntityGroup()` 用该函数做一次早退（同时清理陈旧的 `ghost_states_` 缓存，避免其它代码路径读到过期的 ghost 位置）；`StudioGui::HandleTrajectoryPointClick()`/`HandleTrajectoryPointRightClick()`（路径点、关键帧、"近路径"三处命中测试）/`HandleGhostKeyframeClick()` 都在各自的候选实体循环里加了同样的判断。
+- **Trajectories Tab**：ID 输入框后面新增 "Start Time" 数值框（`InputFloat`，钳制到 `>= 0`），编辑规则与其它数值字段一致（`IsItemDeactivatedAfterEdit` 时提交一次 undo）。
+- **Add Trajectory 弹窗**：新增 "Start Time (s)" 输入框，打开弹窗时默认取当前 `data_model_.virtual_time_`（`add_trajectory_start_time_`），确认后写入新建轨迹的 `start_time_`；也可以之后在 Trajectories Tab 里改。
+- **`RenderTimeline()`**：COMPOSER 模式下 `virtual_time_max_value_` 的计算从"每条轨迹自身时长"改成"`start_time_` + 自身时长"，否则时间轴滑块拖不到晚出现车辆的真正结束时刻。
+- **CSV 导入/导出**：`ImportTrajectoriesCsv()` 用每组样本（按 `Time` 排序后）第一行的 `Time` 作为 `start_time_`；`ExportTrajectoriesCsv()` 反过来把采样点的局部时间加上 `start_time_` 再写入 `Time` 列，使导出的 CSV 与真实採集数据一样体现车辆的实际出现时刻。已知的近似误差：CSV 的 `Time` 是采集时的真实时间戳，内部 `EvaluateTimeAtS` 是按速度做数值积分反推局部时间，两者理论上会有细微误差（尤其在加减速较剧烈的路段）——已确认这个误差可以接受，暂不引入显式的逐点时间戳。
+
 

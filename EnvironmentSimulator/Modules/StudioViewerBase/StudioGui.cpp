@@ -1636,6 +1636,10 @@ void StudioGui::OpenAddTrajectoryDialog()
     add_trajectory_name_        = candidate;
     add_trajectory_init_speed_  = 0.0f;
     add_trajectory_interp_mode_ = 1;  // Spline by default
+    // Defaults to wherever the timeline is currently scrubbed to, so a trajectory created while previewing
+    // later in the scenario appears there rather than always at t=0 (Trajectory_Editing.md, "delayed
+    // appearance" design discussion); still freely editable afterwards via the Trajectories tab.
+    add_trajectory_start_time_ = data_model_.virtual_time_;
 
     // Vehicle Type dropdown (mirrors OpenAddVehicleDialog(), independent state): defaults to "car_white" (the
     // renderer's previous fixed default, Trajectory_Editing.md 7.2) when present, else the first entry.
@@ -1699,6 +1703,14 @@ void StudioGui::HandleAddTrajectoryDialog()
         const char* interp_labels[] = {"Linear", "Spline", "Clothoid"};
         ImGui::Combo("##add_trajectory_interp", &add_trajectory_interp_mode_, interp_labels, IM_ARRAYSIZE(interp_labels));
 
+        // Start Time: the global virtual_time_ at which this vehicle first appears (defaults to wherever the
+        // timeline was scrubbed to when this dialog was opened, but freely editable, and adjustable
+        // afterwards via the Trajectories tab too).
+        ImGui::TextUnformatted("Start Time (s)");
+        ImGui::InputFloat("##add_trajectory_start_time", &add_trajectory_start_time_, 0.0f, 0.0f, "%.2f");
+        if (add_trajectory_start_time_ < 0.0f)
+            add_trajectory_start_time_ = 0.0f;
+
         // Validate the name across both the xosc and entity_trajectories_ namespaces (section 6.1/12)
         bool name_empty = entered_name.empty();
         bool is_duplicate =
@@ -1729,6 +1741,7 @@ void StudioGui::HandleAddTrajectoryDialog()
                 : (add_trajectory_interp_mode_ == 2) ? EntityPath::InterpMode::CLOTHOID
                                                       : EntityPath::InterpMode::CATMULL_ROM;
             traj.vehicle_catalog_entry_name_ = add_trajectory_entry_name_;
+            traj.start_time_                 = static_cast<double>(add_trajectory_start_time_);
 
             // Start and end speed points are always created together: the start's s is fixed at 0, the end's
             // s is kept in sync with the path's total length as points are picked/dragged (both are 0 for now
@@ -1988,6 +2001,8 @@ bool StudioGui::HandleTrajectoryPointClick()
     {
         if (!entry.second.show_path_points_)
             continue;  // path point selection/drag is disabled for this entity (Trajectories tab checkbox)
+        if (!entry.second.IsVisibleAtTime(data_model_.virtual_time_, entry.second.path_.GetTotalLength()))
+            continue;  // not shown in the 3D view at the current virtual_time_, so not clickable there either
 
         int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
         if (index < 0)
@@ -2111,6 +2126,8 @@ bool StudioGui::HandleGhostKeyframeClick()
     {
         if (entry.second.path_.points_.size() < 2)
             continue;  // no meaningful path to slide along
+        if (!entry.second.IsVisibleAtTime(data_model_.virtual_time_, entry.second.path_.GetTotalLength()))
+            continue;  // not shown in the 3D view at the current virtual_time_, so its ghost isn't clickable
 
         double     ghost_s = 0.0;
         EntityPose ghost_pose;
@@ -2318,6 +2335,8 @@ bool StudioGui::HandleTrajectoryPointRightClick()
     {
         if (!entry.second.show_path_points_)
             continue;  // path point selection/context menu is disabled for this entity (Trajectories tab checkbox)
+        if (!entry.second.IsVisibleAtTime(data_model_.virtual_time_, entry.second.path_.GetTotalLength()))
+            continue;  // not shown in the 3D view at the current virtual_time_, so not clickable there either
 
         int index = entry.second.path_.FindNearestPointIndex(hud_mouse_world_x_, hud_mouse_world_y_);
         if (index < 0)
@@ -2353,6 +2372,9 @@ bool StudioGui::HandleTrajectoryPointRightClick()
 
         for (auto& entry : data_model_.entity_trajectories_)
         {
+            if (!entry.second.IsVisibleAtTime(data_model_.virtual_time_, entry.second.path_.GetTotalLength()))
+                continue;  // not shown in the 3D view at the current virtual_time_
+
             for (size_t i = 0; i < entry.second.keyframes_.size(); i++)
             {
                 EntityPose kf_pose = entry.second.path_.Evaluate(entry.second.keyframes_[i].s);
@@ -2386,6 +2408,9 @@ bool StudioGui::HandleTrajectoryPointRightClick()
 
     for (auto& entry : data_model_.entity_trajectories_)
     {
+        if (!entry.second.IsVisibleAtTime(data_model_.virtual_time_, entry.second.path_.GetTotalLength()))
+            continue;  // not shown in the 3D view at the current virtual_time_, so Insert Point can't target it either
+
         double s = 0.0, x = 0.0, y = 0.0, z = 0.0, dist_sqr = 0.0;
         if (!entry.second.path_.FindNearestPositionOnPath(hud_mouse_world_x_, hud_mouse_world_y_, &s, &x, &y, &z, &dist_sqr))
             continue;
@@ -2495,6 +2520,23 @@ void StudioGui::RenderTrajectoriesTab()
             }
             if (duplicate_id)
                 ImGui::PopStyleColor();
+            if (ImGui::IsItemDeactivatedAfterEdit())
+                data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+
+            // Start Time: the global virtual_time_ at which this vehicle first appears (its own speed profile
+            // time still starts at 0 regardless) - real captured data often has vehicles entering partway
+            // through a recording rather than at t=0.
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Start Time");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.0f);
+            float start_time_value = static_cast<float>(traj.start_time_);
+            if (ImGui::InputFloat("##start_time", &start_time_value, 0.0f, 0.0f, "%.2f"))
+            {
+                traj.start_time_                   = std::max(0.0f, start_time_value);
+                data_model_.trajectories_modified_ = true;
+                trajectory_renderer_.MarkDirty(name);
+            }
             if (ImGui::IsItemDeactivatedAfterEdit())
                 data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
             ImGui::SameLine();
@@ -3647,7 +3689,8 @@ void StudioGui::RenderTimeline()
         for (const auto& entry : data_model_.entity_trajectories_)
         {
             double total_time = entry.second.speed_profile_.EvaluateTimeAtS(entry.second.path_.GetTotalLength());
-            data_model_.virtual_time_max_value_ = std::max(data_model_.virtual_time_max_value_, static_cast<float>(total_time));
+            double end_time   = entry.second.start_time_ + total_time;  // scrub range must reach each ghost's actual end, not just its duration from 0
+            data_model_.virtual_time_max_value_ = std::max(data_model_.virtual_time_max_value_, static_cast<float>(end_time));
         }
     }
 
