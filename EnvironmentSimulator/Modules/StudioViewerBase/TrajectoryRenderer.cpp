@@ -386,7 +386,11 @@ void EntityTrajectoryRenderer::ClearReachableRange()
     reachable_s_hi_ = 0.0;
 }
 
-void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points, double mouse_x, double mouse_y, double mouse_z)
+void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points,
+                                                    double                         mouse_x,
+                                                    double                         mouse_y,
+                                                    double                         mouse_z,
+                                                    const std::string&             vehicle_entry_name)
 {
     if (!picking_preview_group_.valid())
         return;
@@ -394,7 +398,32 @@ void EntityTrajectoryRenderer::UpdatePickingPreview(const std::vector<EntityPose
     picking_preview_group_->removeChildren(0, picking_preview_group_->getNumChildren());
 
     if (confirmed_points.empty())
+    {
+        // No point confirmed yet: there is no path/line to preview, so show the vehicle model itself instead,
+        // at the mouse's lane-snapped position/heading (same snap CommitTrajectoryPickingPoint() applies),
+        // so the user can see how it will be placed before clicking the first point. Once a point exists, the
+        // committed path's own line (drawn by Update()/RebuildEntityGroup()) takes over and this model is no
+        // longer needed here.
+        EntityPose preview_pose;
+        preview_pose.x = mouse_x;
+        preview_pose.y = mouse_y;
+        preview_pose.z = mouse_z;
+        preview_pose.h = 0.0;
+        preview_pose.SyncFromWorld(/*align_to_lane=*/true);
+        preview_pose.SyncFromLane();  // snaps x/y/z/h onto the matched lane, oriented along the road direction
+
+        osg::ref_ptr<osg::Node> model = GetOrLoadGhostModel(vehicle_entry_name);
+        if (model.valid())
+        {
+            osg::ref_ptr<osg::PositionAttitudeTransform> tx = new osg::PositionAttitudeTransform();
+            tx->setPosition(
+                osg::Vec3(static_cast<float>(preview_pose.x), static_cast<float>(preview_pose.y), static_cast<float>(preview_pose.z)));
+            tx->setAttitude(osg::Quat(preview_pose.h, osg::Vec3(0.0, 0.0, 1.0)));
+            tx->addChild(model.get());
+            picking_preview_group_->addChild(tx.get());
+        }
         return;
+    }
 
     // The confirmed points themselves are already drawn by Update()/RebuildEntityGroup() as part of the
     // entity's own interpolated curve (it is committed directly into entity_trajectories_ as the user clicks,

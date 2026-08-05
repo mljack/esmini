@@ -483,7 +483,11 @@ void StudioGui::Render(osg::RenderInfo&)
     {
         auto it = data_model_.entity_trajectories_.find(trajectory_picking_entity_name_);
         if (it != data_model_.entity_trajectories_.end())
-            trajectory_renderer_.UpdatePickingPreview(it->second.path_.points_, hud_mouse_world_x_, hud_mouse_world_y_, hud_mouse_world_z_);
+            trajectory_renderer_.UpdatePickingPreview(it->second.path_.points_,
+                                                      hud_mouse_world_x_,
+                                                      hud_mouse_world_y_,
+                                                      hud_mouse_world_z_,
+                                                      it->second.vehicle_catalog_entry_name_);
     }
     else
     {
@@ -2384,6 +2388,10 @@ void StudioGui::RenderTrajectoriesTab()
 
     std::string entity_to_delete;
 
+    // Fetched once per call (not per entity) since it re-parses VehicleCatalog.xosc from disk; shared by every
+    // entity's "Vehicle Type" combo below.
+    std::vector<std::string> vehicle_type_options = GetVehicleCatalogEntryNames();
+
     for (auto& entry : data_model_.entity_trajectories_)
     {
         const std::string& name = entry.first;
@@ -2405,6 +2413,7 @@ void StudioGui::RenderTrajectoriesTab()
         ImGui::SameLine(ImGui::GetWindowWidth() - 30.0f);
         ImVec2 delete_btn_size(16.0f, 16.0f);
         ImVec2 delete_btn_pos = ImGui::GetCursorScreenPos();
+        delete_btn_pos.y += (ImGui::GetFrameHeight() - delete_btn_size.y) * 0.5f;  // center vertically in the row
         ImGui::InvisibleButton("##delete_trajectory", delete_btn_size);
         bool delete_btn_hovered = ImGui::IsItemHovered();
         bool delete_btn_active  = ImGui::IsItemActive();
@@ -2423,12 +2432,37 @@ void StudioGui::RenderTrajectoriesTab()
 
         if (header_open)
         {
+            // Vehicle Type (VehicleCatalog.xosc entryName) used for this trajectory's ghost marker model
+            // (Trajectory_Editing.md 7.2, extended): changing it here re-loads the model on the next
+            // MarkDirty()'d rebuild, same as picking a different one in the Add Trajectory dialog.
+            ImGui::TextUnformatted("Vehicle Type");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(150.0f);
+            std::string current_entry = traj.vehicle_catalog_entry_name_;
+            if (ImGui::BeginCombo("##vehicle_type", current_entry.c_str()))
+            {
+                for (const auto& option : vehicle_type_options)
+                {
+                    bool is_selected = (option == current_entry);
+                    if (ImGui::Selectable(option.c_str(), is_selected))
+                    {
+                        traj.vehicle_catalog_entry_name_   = option;
+                        data_model_.trajectories_modified_ = true;
+                        trajectory_renderer_.MarkDirty(name);
+                        data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
+                    }
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+
             // Initial position/speed mirror the path's/speed profile's first point (Trajectory_Editing.md 8.2);
             // editable only by dragging in the map view / the speed chart below, not via text input here.
             if (!traj.path_.points_.empty())
             {
                 const EntityPose& p0 = traj.path_.points_.front();
-                ImGui::Text("Init pos: x=%.2f, y=%.2f, road %d lane %d s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
+                ImGui::Text("Init pos: x=%.2f, y=%.2f, road %d, lane %d, s=%.2f", p0.x, p0.y, p0.road_id, p0.lane_id, p0.s);
             }
             else
             {

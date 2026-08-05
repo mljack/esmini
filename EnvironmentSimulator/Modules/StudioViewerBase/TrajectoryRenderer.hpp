@@ -49,9 +49,16 @@ public:
     void SetSelectedPoint(const std::string& entity_name, int point_index);
 
     // While a new trajectory is being picked (Trajectory_Editing.md section 6.1), draw the already-confirmed
-    // points plus a rubber-band preview line to the current mouse position. Call every frame while picking is
-    // active; call ClearPickingPreview() once the interaction ends (committed or cancelled).
-    void UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points, double mouse_x, double mouse_y, double mouse_z);
+    // points plus a rubber-band preview line to the current mouse position. Before the first point is
+    // confirmed there is no path/line to show yet, so instead the vehicle model itself (vehicle_entry_name,
+    // e.g. from EntityTrajectory::vehicle_catalog_entry_name_) is drawn at the mouse's lane-snapped position,
+    // oriented along the road direction, so the user can see where/how it will be placed. Call every frame
+    // while picking is active; call ClearPickingPreview() once the interaction ends (committed or cancelled).
+    void UpdatePickingPreview(const std::vector<EntityPose>& confirmed_points,
+                             double                         mouse_x,
+                             double                         mouse_y,
+                             double                         mouse_z,
+                             const std::string&             vehicle_entry_name);
     void ClearPickingPreview();
 
     // Ghost keyframe editing support (Trajectory_Editing_Enhancement.md section 7): the ghost's current arc
