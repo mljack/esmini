@@ -1939,6 +1939,32 @@ void StudioGui::DeleteEntityTrajectory(const std::string& entity_name)
     data_model_.PushTrajectoryUndoState(CaptureTrajectorySelectionSnapshot());
 }
 
+void StudioGui::ResetTrajectoryInteractionStateAndUndoStacks()
+{
+    trajectory_picking_active_       = false;
+    trajectory_point_selected_        = false;
+    trajectory_selected_point_index_  = -1;
+    trajectory_selected_entity_name_.clear();
+    trajectory_point_drag_active_    = false;
+    trajectory_drag_point_index_     = -1;
+    trajectory_drag_entity_name_.clear();
+    speed_point_selected_             = false;
+    speed_selected_point_index_       = -1;
+    speed_selected_entity_name_.clear();
+    speed_point_drag_active_          = false;
+    speed_drag_point_index_           = -1;
+    speed_drag_entity_name_.clear();
+    ghost_keyframe_drag_active_       = false;
+    trajectory_renderer_.ClearGhostOverride();
+    trajectory_renderer_.ClearReachableRange();
+    trajectory_renderer_.ClearPickingPreview();
+
+    // Don't allow undoing back into whatever existed before this reset (Trajectory_Editing.md section 11.5),
+    // and seed a fresh baseline so the first real edit afterwards can still be undone.
+    data_model_.ClearTrajectoryUndoRedoStacks();
+    data_model_.PushTrajectoryUndoState(TrajectorySelectionSnapshot());
+}
+
 bool StudioGui::HandleTrajectoryPointClick()
 {
     const double kHitRadius = 2.0;  // meters, in the ground plane
@@ -3212,6 +3238,13 @@ void StudioGui::RenderMenuBar()
                 positions_extracted_       = false;
                 to_reset_camera_pos_       = true;
                 scenario_object_map_dirty_ = true;
+
+                // File > Clear also resets the independent path+speed-profile trajectories (Trajectory_
+                // Editing.md 5.4) - otherwise it would look like Clear only affects the OpenSCENARIO document,
+                // leaving stale trajectories (and their renderer/undo state) behind.
+                data_model_.entity_trajectories_.clear();
+                data_model_.trajectories_modified_ = false;
+                ResetTrajectoryInteractionStateAndUndoStacks();
             }
             if (ImGui::MenuItem("Open an OpenSCENARIO File ...", nullptr, false, in_composer_mode))
             {
@@ -3259,26 +3292,7 @@ void StudioGui::RenderMenuBar()
                         LOG("Successfully loaded the trajectory file: [%s].", result[0].c_str());
                         // Loading replaces entity_trajectories_ wholesale (Trajectory_Editing.md 5.4); any
                         // selection/drag/picking state referring to the previous set is now stale.
-                        trajectory_picking_active_       = false;
-                        trajectory_point_selected_        = false;
-                        trajectory_selected_point_index_  = -1;
-                        trajectory_selected_entity_name_.clear();
-                        trajectory_point_drag_active_    = false;
-                        trajectory_drag_point_index_     = -1;
-                        trajectory_drag_entity_name_.clear();
-                        speed_point_selected_             = false;
-                        speed_selected_point_index_       = -1;
-                        speed_selected_entity_name_.clear();
-                        speed_point_drag_active_          = false;
-                        speed_drag_point_index_           = -1;
-                        speed_drag_entity_name_.clear();
-                        ghost_keyframe_drag_active_       = false;
-                        trajectory_renderer_.ClearGhostOverride();
-                        trajectory_renderer_.ClearReachableRange();
-                        // Don't allow undoing back into whatever was loaded before this (section 11.5), and
-                        // seed the new baseline so the first real edit after this load can still be undone.
-                        data_model_.ClearTrajectoryUndoRedoStacks();
-                        data_model_.PushTrajectoryUndoState(TrajectorySelectionSnapshot());
+                        ResetTrajectoryInteractionStateAndUndoStacks();
                     }
                     else
                     {

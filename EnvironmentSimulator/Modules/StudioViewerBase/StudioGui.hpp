@@ -141,6 +141,12 @@ private:
     // clears any selection/drag state that referenced it, and pushes one undo step.
     void DeleteEntityTrajectory(const std::string& entity_name);
 
+    // Shared cleanup after entity_trajectories_ has just been wholesale-replaced or cleared (File > Clear,
+    // Load Trajectories): resets all trajectory selection/drag/picking UI state (which would otherwise
+    // reference entities that no longer exist) and seeds a fresh undo baseline, since undoing back into
+    // whatever existed before this reset would not make sense (Trajectory_Editing.md section 11.5).
+    void ResetTrajectoryInteractionStateAndUndoStacks();
+
     // Dragging an existing path point in the map view (Trajectory_Editing.md section 7.4 / 6.3). A click only
     // selects/highlights the nearest point (shows a gizmo); a further click-drag starting on the already-
     // selected point's gizmo is what actually moves it, so a plain click never modifies the trajectory.
