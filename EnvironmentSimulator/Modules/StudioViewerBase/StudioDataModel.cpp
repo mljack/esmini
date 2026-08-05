@@ -3017,11 +3017,12 @@ bool StudioDataModel::ExportTrajectoriesCsv(const std::string& path) const
             double     speed = traj.speed_profile_.EvaluateSpeed(s);
             double     vx    = speed * std::cos(pose.h);
             double     vy    = speed * std::sin(pose.h);
+            double     yaw_deg = pose.h * 180.0 / M_PI;  // this CSV format's Yaw column is in degrees, not radians
 
             // Time is global/absolute in this CSV format, so it's offset by the trajectory's own start_time_
             // (when it first appears on the shared timeline), not just its local 0-based speed-profile time.
             file << id << ',' << (traj.start_time_ + t) << ',' << pose.x << ',' << pose.y << ',' << pose.z << ',' << dims.length << ','
-                << dims.width << ',' << dims.height << ',' << pose.h << ",0,0," << vx << ',' << vy << ",0,0,0,0,vehicle,car,,"
+                << dims.width << ',' << dims.height << ',' << yaw_deg << ",0,0," << vx << ',' << vy << ",0,0,0,0,vehicle,car,,"
                 << (is_ego ? "Y" : "N") << ',' << id << "\n";
         }
         exported++;
@@ -3171,7 +3172,11 @@ bool StudioDataModel::ImportTrajectoriesCsv(const std::string& path)
             pose.x      = sample.x;
             pose.y      = sample.y;
             pose.z      = sample.z;
-            pose.h      = sample.yaw;
+            // sample.yaw is ignored here: it's in degrees (this CSV format's convention) while EntityPose::h
+            // is radians, and the path's own rendering (EntityPath::BuildFineSamples()) already recomputes
+            // heading from the curve's tangent direction between points regardless of what's stored per-point,
+            // so there is nothing meaningful to do with it here anyway.
+            pose.h      = 0.0;
             pose.source = EntityPose::SourceRepr::WORLD;
             // Deliberately not calling SyncFromWorld()/SyncFromLane(): these are exact recorded world
             // positions and must not be snapped onto a lane centerline the way freshly-picked points are.
